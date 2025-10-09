@@ -5,6 +5,8 @@ import edu.wpi.first.math.geometry.Rotation2d;
 import edu.wpi.first.math.geometry.Translation2d;
 import edu.wpi.first.math.kinematics.ChassisSpeeds;
 
+// import edu.wpi.first.wpilibj.RobotController;
+
 /**
  * High-level controller that converts field-relative chassis commands into individual wheel
  * commands, limits acceleration, detects skid, and maintains pose estimation.
@@ -140,6 +142,31 @@ public final class SwerveController {
     ModuleState[] desiredModuleStates =
         SwerveKinematics.inverseKinematics(config, modulePositions, currentChassisCommand);
 
+    // double voltageLimitedMaxWheelSpeed = getVoltageLimitedMaxWheelSpeed();
+    // double maxRequestedWheelSpeed = 0.0;
+    // for (ModuleState moduleState : desiredModuleStates) {
+    //   maxRequestedWheelSpeed = Math.max(maxRequestedWheelSpeed, Math.abs(moduleState.speedMps));
+    // }
+
+    // double appliedSpeedScale = 1.0;
+    // if (maxRequestedWheelSpeed > voltageLimitedMaxWheelSpeed + 1e-6) {
+    //   if (voltageLimitedMaxWheelSpeed < 1e-9) {
+    //     appliedSpeedScale = 0.0;
+    //   } else {
+    //     appliedSpeedScale = voltageLimitedMaxWheelSpeed / maxRequestedWheelSpeed;
+    //   }
+
+    //   for (ModuleState moduleState : desiredModuleStates) {
+    //     moduleState.speedMps *= appliedSpeedScale;
+    //   }
+
+    //   currentChassisCommand =
+    //       new ChassisSpeeds(
+    //           currentChassisCommand.vxMetersPerSecond * appliedSpeedScale,
+    //           currentChassisCommand.vyMetersPerSecond * appliedSpeedScale,
+    //           currentChassisCommand.omegaRadiansPerSecond * appliedSpeedScale);
+    // }
+
     // Send optimized state to each module with feedforward and feedback control
     for (int i = 0; i < swerveModules.length; i++) {
       SwerveModule module = swerveModules[i];
@@ -165,6 +192,19 @@ public final class SwerveController {
 
     previousChassisCommand = currentChassisCommand;
   }
+
+  // private double getVoltageLimitedMaxWheelSpeed() {
+  //   if (config.kV < 1e-6) {
+  //     return config.maxWheelSpeed;
+  //   }
+
+  //   double availableVoltage = Math.max(0.0, RobotController.getBatteryVoltage() - 0.5);
+  //   if (availableVoltage <= config.kS) {
+  //     return 0.0;
+  //   }
+  //   double feedforwardLimitedSpeed = (availableVoltage - config.kS) / config.kV;
+  //   return Math.min(config.maxWheelSpeed, feedforwardLimitedSpeed);
+  // }
 
   /** Returns the most recent body frame command used for the modules. */
   public ChassisSpeeds getCurrentBodyCommand() {

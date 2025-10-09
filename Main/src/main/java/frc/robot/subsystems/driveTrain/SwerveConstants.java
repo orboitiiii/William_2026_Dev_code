@@ -27,11 +27,12 @@ public class SwerveConstants {
 
     public static final Translation2d[] moduleLocations =
         new Translation2d[] {
-          new Translation2d(kWheelBase / 2.0, kWheelBase / 2.0),
-          new Translation2d(kWheelBase / 2.0, -kWheelBase / 2.0),
-          new Translation2d(-kWheelBase / 2.0, kWheelBase / 2.0),
-          new Translation2d(-kWheelBase / 2.0, -kWheelBase / 2.0)
+          new Translation2d(kWheelBase / 2.0, kTrackWidth / 2.0),
+          new Translation2d(kWheelBase / 2.0, -kTrackWidth / 2.0),
+          new Translation2d(-kWheelBase / 2.0, kTrackWidth / 2.0),
+          new Translation2d(-kWheelBase / 2.0, -kTrackWidth / 2.0)
         };
+
     // Angular offsets of the modules relative to the chassis in radians
     public static final double kFrontLeftChassisAngularOffset = -Math.PI / 2;
     public static final double kFrontRightChassisAngularOffset = 0;
@@ -57,13 +58,15 @@ public class SwerveConstants {
             kWheelBase,
             kTrackWidth,
             kMaxSpeedMetersPerSecond,
-            3.0,
-            3.0,
-            3.5,
-            Math.PI,
-            0.072852,
+            30.0,
+            30.0,
+            30.0,
+            2 * Math.PI,
+            0,
+            // 0.072852,
             2.3316,
-            0.12439,
+            0,
+            // 0.12439,
             1.0,
             0.062798);
   }

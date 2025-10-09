@@ -26,7 +26,10 @@ public final class SwerveUtil {
   }
 
   public static double sign(double v) {
-    return v >= 0 ? 1.0 : -1.0;
+    if (Math.abs(v) < 1e-6) {
+      return 0.0;
+    }
+    return Math.signum(v);
   }
 
   public static Translation2d rotate(Translation2d v, double yawRad) {
