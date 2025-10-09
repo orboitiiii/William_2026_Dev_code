@@ -1,8 +1,9 @@
 package frc.robot.lib.core;
 
+import java.util.function.Supplier;
+
 import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.math.kinematics.ChassisSpeeds;
-import java.util.function.Supplier;
 
 public final class RobotContext {
   public Supplier<ChassisSpeeds> driverDesireSpeeds;

@@ -3,38 +3,70 @@ package frc.robot.lib.swerve;
 import edu.wpi.first.math.geometry.Translation2d;
 import edu.wpi.first.math.kinematics.ChassisSpeeds;
 
-/** Detects skidding wheels by comparing measured vs expected speeds. */
+/**
+ * Detects when a wheel is skidding by comparing the measured wheel speeds with the expected wheel
+ * speeds based on the chassis velocity. If the ratio of fastest to slowest wheel exceeds a
+ * threshold and a wheel's speed is significantly larger than expected, that wheel is flagged as
+ * skidding.
+ */
 public final class SkidDetector {
-  private final double ratioThresh;
+  private final double speedRatioThreshold;
 
-  public SkidDetector(double ratioThresh) {
-    this.ratioThresh = ratioThresh;
+  /**
+   * Creates a new skid detector.
+   *
+   * @param speedRatioThreshold ratio between the fastest and slowest wheel speed above which skid
+   *     detection is enabled
+   */
+  public SkidDetector(final double speedRatioThreshold) {
+    this.speedRatioThreshold = speedRatioThreshold;
   }
 
-  public boolean[] detect(Translation2d[] r, ChassisSpeeds body, double[] measuredMps) {
-    double[] expected = new double[4];
-    double max = 0.0;
-    double min = 1e9;
-    for (int i = 0; i < 4; i++) {
-      double evx = body.vxMetersPerSecond - body.omegaRadiansPerSecond * r[i].getY();
-      double evy = body.vyMetersPerSecond + body.omegaRadiansPerSecond * r[i].getX();
-      expected[i] = Math.hypot(evx, evy);
-      max = Math.max(max, measuredMps[i]);
-      min = Math.min(min, measuredMps[i]);
+  /**
+   * Returns a boolean array indicating which wheels are skidding.
+   *
+   * @param modulePositions positions of each module relative to the robot center
+   * @param bodySpeeds the commanded chassis speeds in body frame
+   * @param measuredWheelSpeeds absolute measured wheel speeds (m/s)
+   * @return array of booleans, true if the corresponding wheel is skidding
+   */
+  public boolean[] detectSkid(
+      final Translation2d[] modulePositions,
+      final ChassisSpeeds bodySpeeds,
+      final double[] measuredWheelSpeeds) {
+    double[] expectedWheelSpeeds = new double[measuredWheelSpeeds.length];
+    double maxMeasured = 0.0;
+    double minMeasured = Double.POSITIVE_INFINITY;
+
+    // Compute expected wheel speeds from chassis motion and track min/max measured speed
+    for (int i = 0; i < measuredWheelSpeeds.length; i++) {
+      double expectedVx =
+          bodySpeeds.vxMetersPerSecond
+              - bodySpeeds.omegaRadiansPerSecond * modulePositions[i].getY();
+      double expectedVy =
+          bodySpeeds.vyMetersPerSecond
+              + bodySpeeds.omegaRadiansPerSecond * modulePositions[i].getX();
+      expectedWheelSpeeds[i] = Math.hypot(expectedVx, expectedVy);
+      maxMeasured = Math.max(maxMeasured, measuredWheelSpeeds[i]);
+      minMeasured = Math.min(minMeasured, measuredWheelSpeeds[i]);
     }
-    boolean[] skid = new boolean[4];
-    if (min < 1e-6) {
-      min = 1e-6;
+
+    boolean[] skidDetected = new boolean[measuredWheelSpeeds.length];
+    if (minMeasured < 1e-6) {
+      minMeasured = 1e-6;
     }
-    if (max / min > ratioThresh) {
+    // Only perform skid detection if the spread between wheel speeds is significant
+    if (maxMeasured / minMeasured > speedRatioThreshold) {
       double groupMax = 0.0;
-      for (double v : measuredMps) {
+      for (double v : measuredWheelSpeeds) {
         groupMax = Math.max(groupMax, v);
       }
-      for (int i = 0; i < 4; i++) {
-        skid[i] = (measuredMps[i] > 0.9 * groupMax) && (measuredMps[i] > 1.3 * expected[i]);
+      for (int i = 0; i < measuredWheelSpeeds.length; i++) {
+        skidDetected[i] =
+            (measuredWheelSpeeds[i] > 0.9 * groupMax)
+                && (measuredWheelSpeeds[i] > 1.3 * expectedWheelSpeeds[i]);
       }
     }
-    return skid;
+    return skidDetected;
   }
 }

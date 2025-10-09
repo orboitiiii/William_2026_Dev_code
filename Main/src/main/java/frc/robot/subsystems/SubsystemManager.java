@@ -1,6 +1,8 @@
 // ================= SubsystemManager =================
 package frc.robot.subsystems;
 
+import java.util.Arrays;
+
 import edu.wpi.first.math.kinematics.ChassisSpeeds;
 import edu.wpi.first.wpilibj.PS5Controller;
 import frc.robot.lib.core.RobotContext;
@@ -11,7 +13,6 @@ import frc.robot.lib.swerve.SwerveModuleIo;
 import frc.robot.subsystems.driveTrain.SparkMaxModuleIo;
 import frc.robot.subsystems.driveTrain.SwerveConstants.DriveConstants;
 import frc.robot.subsystems.driveTrain.SwerveSubsystem;
-import java.util.Arrays;
 
 public class SubsystemManager {
   // FL, FR, RL, RR

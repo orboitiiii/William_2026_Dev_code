@@ -23,7 +23,7 @@ public final class SwerveSubsystem extends SubsystemNode<SwerveSubsystem.State> 
   }
 
   public Pose2d getPose() {
-    return ctrl.getRobotPose();
+    return ctrl.getEstimatedRobotPose();
   }
 
   @Override
@@ -41,16 +41,16 @@ public final class SwerveSubsystem extends SubsystemNode<SwerveSubsystem.State> 
   protected void handle(State state, RobotContext ctx) {
     switch (state) {
       case DISABLED:
-        ctrl.stop();
+        ctrl.stopAllModules();
         break;
       case X_LOCK:
-        ctrl.holdXLock();
+        ctrl.engageXLock();
         break;
       case OPEN_LOOP_TELEOP:
       default:
         {
           ChassisSpeeds cmd = ctx.driverDesireSpeeds.get();
-          ctrl.executeFieldCommand(cmd, ctx.robotPose.get().getRotation());
+          ctrl.executeFieldRelativeCommand(cmd, ctx.robotPose.get().getRotation());
           break;
         }
     }
