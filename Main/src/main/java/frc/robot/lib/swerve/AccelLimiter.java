@@ -42,7 +42,14 @@ public final class AccelLimiter {
     double vMagPrev = Math.hypot(vxPrev, vyPrev);
     double aFmax =
         Math.max(0.0, cfg.aMaxForward0 * (1.0 - vMagPrev / Math.max(cfg.maxWheelSpeed, 1e-6)));
-    aF = SwerveUtil.clamp(aF, -aFmax, aFmax);
+    // aF = SwerveUtil.clamp(aF, -aFmax, aFmax);
+    // Limit forward (positive) acceleration as speed increases, but still allow braking so the
+    // robot can decelerate quickly even when already at top speed.
+    if (aF > aFmax) {
+      aF = aFmax;
+    } else if (aF < -cfg.aMaxSkid) {
+      aF = -cfg.aMaxSkid;
+    }
     axF = aF * fx;
     ayF = aF * fy;
 

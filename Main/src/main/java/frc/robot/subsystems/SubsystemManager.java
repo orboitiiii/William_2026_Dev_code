@@ -3,12 +3,12 @@ package frc.robot.subsystems;
 
 import edu.wpi.first.math.kinematics.ChassisSpeeds;
 import edu.wpi.first.wpilibj.PS5Controller;
-import frc.robot.lib.core.RobotContext;
-import frc.robot.lib.core.SubsystemNode;
+import frc.robot.lib.core.RobotOperatingContext;
+import frc.robot.lib.core.StateDrivenSubsystem;
 import frc.robot.lib.swerve.SwerveController;
 import frc.robot.lib.swerve.SwerveModule;
-import frc.robot.lib.swerve.SwerveModuleIo;
-import frc.robot.subsystems.driveTrain.SparkMaxModuleIo;
+import frc.robot.subsystems.driveTrain.Pigeon2Gyro;
+import frc.robot.subsystems.driveTrain.SparkMaxModuleIO;
 import frc.robot.subsystems.driveTrain.SwerveConstants.DriveConstants;
 import frc.robot.subsystems.driveTrain.SwerveConstants.OIConstants;
 import frc.robot.subsystems.driveTrain.SwerveSubsystem;
@@ -16,21 +16,21 @@ import java.util.Arrays;
 
 public class SubsystemManager {
   // FL, FR, RL, RR
-  private final SwerveModuleIo[] moduleIo =
-      new SwerveModuleIo[] {
-        new SparkMaxModuleIo(
+  private final SparkMaxModuleIO[] moduleIo =
+      new SparkMaxModuleIO[] {
+        new SparkMaxModuleIO(
             DriveConstants.kFrontLeftDrivingCanId,
             DriveConstants.kFrontLeftTurningCanId,
             DriveConstants.kFrontLeftChassisAngularOffset),
-        new SparkMaxModuleIo(
+        new SparkMaxModuleIO(
             DriveConstants.kFrontRightDrivingCanId,
             DriveConstants.kFrontRightTurningCanId,
             DriveConstants.kFrontRightChassisAngularOffset),
-        new SparkMaxModuleIo(
+        new SparkMaxModuleIO(
             DriveConstants.kRearLeftDrivingCanId,
             DriveConstants.kRearLeftTurningCanId,
             DriveConstants.kBackLeftChassisAngularOffset),
-        new SparkMaxModuleIo(
+        new SparkMaxModuleIO(
             DriveConstants.kRearRightDrivingCanId,
             DriveConstants.kRearRightTurningCanId,
             DriveConstants.kBackRightChassisAngularOffset)
@@ -42,24 +42,27 @@ public class SubsystemManager {
   private final SwerveController swerveController =
       new SwerveController(DriveConstants.swerveConfig, modules);
 
-  private final SwerveSubsystem swerveSubsystem = new SwerveSubsystem(swerveController);
+  private final Pigeon2Gyro gyro = new Pigeon2Gyro(0, null, false);
+
+  private final SwerveSubsystem swerveSubsystem = new SwerveSubsystem(swerveController, gyro);
 
   private final PS5Controller driver = new PS5Controller(0);
 
-  private final SubsystemNode<?>[] subsystems = new SubsystemNode<?>[] {swerveSubsystem};
+  private final StateDrivenSubsystem<?>[] subsystems =
+      new StateDrivenSubsystem<?>[] {swerveSubsystem};
 
-  public RobotContext readContext() {
+  public RobotOperatingContext readContext() {
     double vx =
         applyDeadband(driver.getLeftY())
             * DriveConstants.kMaxSpeedMetersPerSecond; // PS5 forward is negative
     double vy = applyDeadband(driver.getLeftX()) * DriveConstants.kMaxSpeedMetersPerSecond;
     double w = applyDeadband(driver.getRightX()) * DriveConstants.kMaxAngularSpeed;
 
-    return new RobotContext(() -> new ChassisSpeeds(vx, vy, w), () -> swerveSubsystem.getPose());
+    return new RobotOperatingContext(new ChassisSpeeds(vx, vy, w), () -> swerveSubsystem.getPose());
   }
 
-  public void operate(frc.robot.lib.core.RobotIntentState desired, RobotContext ctx) {
-    for (SubsystemNode<?> node : subsystems) {
+  public void operate(frc.robot.lib.core.RobotIntentState desired, RobotOperatingContext ctx) {
+    for (StateDrivenSubsystem<?> node : subsystems) {
       node.operate(desired, ctx);
     }
   }

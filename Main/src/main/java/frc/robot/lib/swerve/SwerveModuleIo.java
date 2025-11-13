@@ -1,6 +1,10 @@
 package frc.robot.lib.swerve;
 
-public interface SwerveModuleIo {
+/**
+ * Interface for a Swerve Module's IO (Input/Output). This abstracts the hardware (SparkMax, Falcon)
+ * from the logical SwerveModule. Renamed to SwerveModuleIO for naming convention.
+ */
+public interface SwerveModuleIO {
   /**
    * @return Current module azimuth angle in radians (absolute, field-aligned zero).
    */

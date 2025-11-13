@@ -6,14 +6,14 @@ package frc.robot;
 
 import edu.wpi.first.wpilibj.DriverStation;
 import edu.wpi.first.wpilibj.TimedRobot;
-import frc.robot.lib.core.RobotContext;
 import frc.robot.lib.core.RobotIntentState;
+import frc.robot.lib.core.RobotOperatingContext;
 import frc.robot.subsystems.SubsystemManager;
 
 public class Robot extends TimedRobot {
 
   private final SubsystemManager subs = new SubsystemManager();
-  public RobotContext robotContext;
+  public RobotOperatingContext robotContext;
   public RobotIntentState desired;
 
   public Robot() {}
@@ -68,8 +68,8 @@ public class Robot extends TimedRobot {
   @Override
   public void testExit() {}
 
-  public RobotIntentState decideRobotState(RobotContext ctx) {
+  public RobotIntentState decideRobotState(RobotOperatingContext ctx) {
     if (DriverStation.isDisabled()) return RobotIntentState.DISABLED;
-    return RobotIntentState.TRAVAL;
+    return RobotIntentState.TRAVEL;
   }
 }

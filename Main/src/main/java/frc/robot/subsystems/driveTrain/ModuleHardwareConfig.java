@@ -3,20 +3,24 @@ package frc.robot.subsystems.driveTrain;
 import com.revrobotics.spark.config.ClosedLoopConfig.FeedbackSensor;
 import com.revrobotics.spark.config.SparkBaseConfig.IdleMode;
 import com.revrobotics.spark.config.SparkMaxConfig;
-
 import frc.robot.subsystems.driveTrain.SwerveConstants.ModuleConstants;
 
-public final class SwerveConfigs {
+/**
+ * Holds all vendor-specific (e.g., SparkMax) hardware configuration objects. This was renamed from
+ * 'SwerveConfigs' to avoid naming conflicts.
+ */
+public final class ModuleHardwareConfig {
   public static final class MAXSwerveModule {
     public static final SparkMaxConfig drivingConfig = new SparkMaxConfig();
     public static final SparkMaxConfig turningConfig = new SparkMaxConfig();
 
     static {
-      // Use module constants to calculate conversion factors and feed forward gain.
+      // Use module constants to calculate conversion factors
       double drivingFactor =
           ModuleConstants.kWheelDiameterMeters * Math.PI / ModuleConstants.kDrivingMotorReduction;
-      double turningFactor = 2 * Math.PI;
+      double turningFactor = 2 * Math.PI; // Radians
 
+      // --- Driving Motor Configuration ---
       drivingConfig
           .idleMode(IdleMode.kBrake)
           .smartCurrentLimit(40)
@@ -34,9 +38,13 @@ public final class SwerveConfigs {
           .voltageCompensation(12.0)
           .closedLoop
           .feedbackSensor(FeedbackSensor.kPrimaryEncoder)
-          .pid(0.062798, 0.0, 0.0)
+          .pid(
+              SwerveConstants.DriveConstants.swerveConfig.kPSpeed,
+              0.0,
+              0.0) // Use kP from SwerveConfig
           .outputRange(-1.0, 1.0);
 
+      // --- Turning Motor Configuration ---
       turningConfig
           .idleMode(IdleMode.kBrake)
           .smartCurrentLimit(20)
@@ -52,7 +60,10 @@ public final class SwerveConfigs {
       turningConfig
           .closedLoop
           .feedbackSensor(FeedbackSensor.kAbsoluteEncoder)
-          .pid(1.0, 0.0, 0.0)
+          .pid(
+              SwerveConstants.DriveConstants.swerveConfig.kPAngle,
+              0.0,
+              0.0) // Use kP from SwerveConfig
           .outputRange(-1.0, 1.0)
           .positionWrappingEnabled(true)
           .positionWrappingInputRange(0.0, turningFactor);

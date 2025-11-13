@@ -8,11 +8,14 @@ import com.revrobotics.spark.SparkBase.ResetMode;
 import com.revrobotics.spark.SparkClosedLoopController;
 import com.revrobotics.spark.SparkLowLevel.MotorType;
 import com.revrobotics.spark.SparkMax;
-
-import frc.robot.lib.swerve.SwerveModuleIo;
+import frc.robot.lib.swerve.SwerveModuleIO;
 import frc.robot.lib.swerve.SwerveUtil;
 
-public final class SparkMaxModuleIo implements SwerveModuleIo {
+/**
+ * Concrete implementation of the SwerveModuleIO interface for SparkMax controllers. Renamed from
+ * SparkMaxModuleIo to SparkMaxModuleIO for naming convention.
+ */
+public final class SparkMaxModuleIO implements SwerveModuleIO {
   private final SparkMax drive;
   private final SparkMax turn;
 
@@ -28,17 +31,18 @@ public final class SparkMaxModuleIo implements SwerveModuleIo {
    * @param turnCanId
    * @param angleOffsetRad
    */
-  public SparkMaxModuleIo(int driveCanId, int turnCanId, double angleOffsetRad) {
+  public SparkMaxModuleIO(int driveCanId, int turnCanId, double angleOffsetRad) {
 
     this.drive = new SparkMax(driveCanId, MotorType.kBrushless);
     this.turn = new SparkMax(turnCanId, MotorType.kBrushless);
 
+    // Use the renamed ModuleHardwareConfig class
     drive.configure(
-        SwerveConfigs.MAXSwerveModule.drivingConfig,
+        ModuleHardwareConfig.MAXSwerveModule.drivingConfig,
         ResetMode.kResetSafeParameters,
         PersistMode.kPersistParameters);
     turn.configure(
-        SwerveConfigs.MAXSwerveModule.turningConfig,
+        ModuleHardwareConfig.MAXSwerveModule.turningConfig,
         ResetMode.kResetSafeParameters,
         PersistMode.kPersistParameters);
 
@@ -48,9 +52,9 @@ public final class SparkMaxModuleIo implements SwerveModuleIo {
 
     this.angleOffsetRad = angleOffsetRad;
 
-    this.prevDrivePosMeters = driveEnc.getPosition();
-
+    // LOGIC FIX: Reset encoder *before* sampling its position
     driveEnc.setPosition(0);
+    this.prevDrivePosMeters = driveEnc.getPosition();
   }
 
   @Override
