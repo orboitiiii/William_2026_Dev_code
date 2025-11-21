@@ -4,26 +4,21 @@ import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.math.geometry.Rotation2d;
 import edu.wpi.first.math.geometry.Translation2d;
 import edu.wpi.first.math.kinematics.ChassisSpeeds;
+import java.util.Optional;
 
-// import edu.wpi.first.wpilibj.RobotController;
-
-/**
- * High-level controller that converts field-relative chassis commands into individual wheel
- * commands, limits acceleration, detects skid, and maintains pose estimation.
- */
 public final class SwerveController {
   private final SwerveConfig config;
   private final Translation2d[] modulePositions;
   private final SwerveModule[] swerveModules;
+
+  // Libraries
   private final AccelLimiter accelLimiter;
   private final ArcOdometry arcOdometry = new ArcOdometry();
   private final FomPoseTracker poseTracker = new FomPoseTracker();
-  private final SkidDetector wheelSkidDetector = new SkidDetector(1.6);
+  private final SkidDetector wheelSkidDetector = new SkidDetector(1.5);
 
-  /** the most recent chassis command in robot frame */
+  // State
   private ChassisSpeeds currentChassisCommand = new ChassisSpeeds();
-
-  /** the previous chassis command used for skid detection */
   private ChassisSpeeds previousChassisCommand = new ChassisSpeeds();
 
   public SwerveController(final SwerveConfig config, final SwerveModule[] modules) {
@@ -33,206 +28,184 @@ public final class SwerveController {
     this.accelLimiter = new AccelLimiter(config);
   }
 
-  /**
-   * Resets internal state to a known starting pose. Must be called at the start of a match.
-   *
-   * @param startPose initial robot pose in the field frame
-   */
   public void reset(final Pose2d startPose) {
     poseTracker.reset(startPose);
     accelLimiter.reset();
-    for (SwerveModule module : swerveModules) {
-      module.lastSteerRad = SwerveUtil.wrap(module.io.getSteerAngleRad());
-      module.lastDriveMps = module.io.getDriveVelocityMps();
-      module.ignoreForOdom = false;
+    for (SwerveModule m : swerveModules) {
+      m.lastSteerRad = SwerveUtil.wrap(m.io.getSteerAngleRad());
+      m.lastDriveMps = m.io.getDriveVelocityMps();
+      m.ignoreForOdom = false;
     }
   }
 
+  // =================================================================================
+  //  Odometry Update (Prediction)
+  // =================================================================================
+
   /**
-   * Incorporates sensor measurements into the pose tracker. Pass in the yaw in radians and
-   * optionally a vision pose and its figure of merit (FoM).
+   * Updates the robot pose based purely on wheel encoders and gyro. This is the "Prediction" step
+   * of the filter.
    *
-   * @param imuYawRad current yaw from the IMU in radians
-   * @param imuYawRateRadPerS yaw rate from the IMU in radians per second
-   * @param visionPose optional vision-estimated pose in field coordinates
-   * @param visionFom optional figure of merit for the vision measurement (lower = better)
+   * @param yaw The current gyro angle (Robot Heading).
+   * @param yawRate The current gyro angular velocity (rad/s).
+   * @return The predicted Pose2d.
    */
-  public void updatePoseEstimation(
-      final double imuYawRad,
-      final double imuYawRateRadPerS,
-      final java.util.Optional<Pose2d> visionPose,
-      final java.util.Optional<Double> visionFom,
-      final double avgTagAreaPercentage) {
+  public Pose2d updateOdometry(Rotation2d yaw, double yawRate) {
+    // Calculate delta in Robot Frame
     Translation2d robotDelta = arcOdometry.updateRobotFrameDelta(swerveModules);
-    Translation2d fieldDelta = SwerveUtil.rotate(robotDelta, imuYawRad);
-    double deltaYawRad = imuYawRateRadPerS * config.dt;
 
-    poseTracker.predictPose(fieldDelta, deltaYawRad);
-    if (visionPose.isPresent()) {
-      if (Math.abs(imuYawRateRadPerS) > Math.PI) {
-        double fom = visionFom.orElse(0.15);
-        poseTracker.correctPoseWithVision(visionPose.get(), fom);
-      }
-      if (avgTagAreaPercentage > 0.80) {
-        double fom = visionFom.orElse(0.00001);
-        poseTracker.correctPoseWithVision(visionPose.get(), fom);
-      } else if (avgTagAreaPercentage > 0.60) {
-        double fom = visionFom.orElse(0.005);
-        poseTracker.correctPoseWithVision(visionPose.get(), fom);
-      } else if (avgTagAreaPercentage > 0.40) {
-        double fom = visionFom.orElse(0.01);
-        poseTracker.correctPoseWithVision(visionPose.get(), fom);
-      } else if (avgTagAreaPercentage > 0.22) {
-        double fom = visionFom.orElse(0.02);
-        poseTracker.correctPoseWithVision(visionPose.get(), fom);
-      } else if (avgTagAreaPercentage < 0.22) {
-        double fom = visionFom.orElse(0.035);
-        poseTracker.correctPoseWithVision(visionPose.get(), fom);
-      }
-    }
+    // Rotate to Field Frame (using Gyro Angle)
+    Translation2d fieldDelta = SwerveUtil.rotate(robotDelta, yaw.getRadians());
+
+    // Calculate delta Yaw (using Gyro Rate for better temporal resolution)
+    double deltaYaw = yawRate * config.dt;
+
+    // Push to Tracker
+    poseTracker.predict(fieldDelta, deltaYaw);
+
+    return poseTracker.get();
   }
 
+  // =================================================================================
+  //  Vision Update (Correction)
+  // =================================================================================
+
   /**
-   * Executes a field-relative chassis speed command. Handles skid detection, acceleration limiting,
-   * wheel state optimization, and drive voltage calculation.
+   * fuses a vision measurement into the current pose estimate. This is the "Correction" step of the
+   * filter.
    *
-   * @param fieldCommand desired chassis speeds in the field frame
-   * @param robotHeading current robot heading
+   * @param visionPose The pose observed by the camera.
+   * @param visionFom The uncertainty (Standard Deviation) of the vision data.
+   * @return The corrected Pose2d.
    */
+  public Pose2d updateVision(Pose2d visionPose, double visionFom) {
+    poseTracker.correct(visionPose, visionFom);
+    return poseTracker.get();
+  }
+
+  // =================================================================================
+  //  3. Fused Update (Orchestration)
+  // =================================================================================
+
+  /**
+   * The main entry point for pose estimation. Calls Odometry update and conditionally calls Vision
+   * update.
+   *
+   * @param yaw Current Gyro Yaw.
+   * @param yawRate Current Gyro Rate.
+   * @param visionPose Optional vision measurement.
+   * @param visionFom Optional vision uncertainty.
+   * @return The final estimated Pose2d.
+   */
+  public Pose2d updatePoseEstimation(
+      Rotation2d yaw, double yawRate, Optional<Pose2d> visionPose, Optional<Double> visionFom) {
+
+    // Always run prediction first
+    Pose2d predictedPose = updateOdometry(yaw, yawRate);
+
+    // Guard Clause: If no vision, return prediction immediately
+    if (visionPose.isEmpty()) {
+      return predictedPose;
+    }
+
+    // Guard Clause: Reject vision if spinning too fast (Motion Blur / Latency issues)
+    if (Math.abs(yawRate) > 2.5) { // Threshold: 2.5 rad/s
+      return predictedPose;
+    }
+
+    // Apply Correction
+    // Default FoM to 0.9 if not provided (Conservative fallback)
+    return updateVision(visionPose.get(), visionFom.orElse(0.9));
+  }
+
+  // =================================================================================
+  //  Command Execution (Control Logic)
+  // =================================================================================
+
   public void executeFieldRelativeCommand(
       final ChassisSpeeds fieldCommand, final Rotation2d robotHeading) {
+    // Skid Detection & Odometry Trust Adjustment
+    handleSkidDetection();
 
-    poseTracker.setOdometryFom(0.02);
+    // Convert to Body Frame
+    Translation2d linearField =
+        new Translation2d(fieldCommand.vxMetersPerSecond, fieldCommand.vyMetersPerSecond);
+    Translation2d linearBody = SwerveUtil.rotate(linearField, -robotHeading.getRadians());
 
-    // Collect measured wheel speeds for skid detection
-    double[] measuredWheelSpeeds = new double[swerveModules.length];
-    for (int i = 0; i < swerveModules.length; i++) {
-      measuredWheelSpeeds[i] = Math.abs(swerveModules[i].io.getDriveVelocityMps());
-    }
+    // Acceleration Limiting (Rate Limiter)
+    ChassisSpeeds targetBody =
+        new ChassisSpeeds(linearBody.getX(), linearBody.getY(), fieldCommand.omegaRadiansPerSecond);
+    currentChassisCommand = accelLimiter.limit(targetBody);
 
-    // Detect skidding wheels and mark them to be ignored by odometry
-    boolean[] skiddingWheel =
-        wheelSkidDetector.detectSkid(modulePositions, previousChassisCommand, measuredWheelSpeeds);
-    boolean anySkid = false;
-    for (int i = 0; i < swerveModules.length; i++) {
-      swerveModules[i].ignoreForOdom = skiddingWheel[i];
-      anySkid |= skiddingWheel[i];
-    }
-    if (anySkid) {
-      poseTracker.setOdometryFom(
-          Math.hypot(
-                  previousChassisCommand.vxMetersPerSecond,
-                  previousChassisCommand.vyMetersPerSecond)
-              / 2);
-    }
-
-    // Convert field-relative command into robot frame
-    Translation2d bodyVelocity =
-        SwerveUtil.rotate(
-            new Translation2d(fieldCommand.vxMetersPerSecond, fieldCommand.vyMetersPerSecond),
-            -robotHeading.getRadians());
-
-    // Limit acceleration before computing module commands
-    currentChassisCommand =
-        accelLimiter.limit(
-            new ChassisSpeeds(
-                bodyVelocity.getX(), bodyVelocity.getY(), fieldCommand.omegaRadiansPerSecond));
-
-    // Compute desired module states using kinematics
-    ModuleState[] desiredModuleStates =
+    // Inverse Kinematics -> Optimization -> Output
+    ModuleState[] desiredStates =
         SwerveKinematics.inverseKinematics(config, modulePositions, currentChassisCommand);
 
-    // double voltageLimitedMaxWheelSpeed = getVoltageLimitedMaxWheelSpeed();
-    // double maxRequestedWheelSpeed = 0.0;
-    // for (ModuleState moduleState : desiredModuleStates) {
-    //   maxRequestedWheelSpeed = Math.max(maxRequestedWheelSpeed, Math.abs(moduleState.speedMps));
-    // }
-
-    // double appliedSpeedScale = 1.0;
-    // if (maxRequestedWheelSpeed > voltageLimitedMaxWheelSpeed + 1e-6) {
-    //   if (voltageLimitedMaxWheelSpeed < 1e-9) {
-    //     appliedSpeedScale = 0.0;
-    //   } else {
-    //     appliedSpeedScale = voltageLimitedMaxWheelSpeed / maxRequestedWheelSpeed;
-    //   }
-
-    //   for (ModuleState moduleState : desiredModuleStates) {
-    //     moduleState.speedMps *= appliedSpeedScale;
-    //   }
-
-    //   currentChassisCommand =
-    //       new ChassisSpeeds(
-    //           currentChassisCommand.vxMetersPerSecond * appliedSpeedScale,
-    //           currentChassisCommand.vyMetersPerSecond * appliedSpeedScale,
-    //           currentChassisCommand.omegaRadiansPerSecond * appliedSpeedScale);
-    // }
-
-    // Send optimized state to each module with feedforward and feedback control
     for (int i = 0; i < swerveModules.length; i++) {
-      SwerveModule module = swerveModules[i];
-
-      ModuleState optimizedState =
-          SwerveKinematics.optimize(
-              desiredModuleStates[i], new Rotation2d(module.io.getSteerAngleRad()));
-      module.io.setSteerTargetAngleRad(optimizedState.angle.getRadians());
-
-      double currentWheelSpeed = module.io.getDriveVelocityMps();
-      double estimatedAccel = (optimizedState.speedMps - module.lastDriveMps) / config.dt;
-
-      double feedforwardVoltage =
-          SwerveUtil.sign(optimizedState.speedMps) * config.kS
-              + config.kV * optimizedState.speedMps
-              + config.kA * estimatedAccel;
-
-      double feedbackVoltage = config.kPSpeed * (optimizedState.speedMps - currentWheelSpeed);
-
-      module.io.setDriveVoltage(feedforwardVoltage + feedbackVoltage);
-      module.lastDriveMps = currentWheelSpeed;
+      applyModuleState(i, desiredStates[i]);
     }
 
     previousChassisCommand = currentChassisCommand;
   }
 
-  // private double getVoltageLimitedMaxWheelSpeed() {
-  //   if (config.kV < 1e-6) {
-  //     return config.maxWheelSpeed;
-  //   }
+  private void handleSkidDetection() {
+    double[] speeds = new double[swerveModules.length];
+    for (int i = 0; i < swerveModules.length; i++)
+      speeds[i] = Math.abs(swerveModules[i].io.getDriveVelocityMps());
 
-  //   double availableVoltage = Math.max(0.0, RobotController.getBatteryVoltage() - 0.5);
-  //   if (availableVoltage <= config.kS) {
-  //     return 0.0;
-  //   }
-  //   double feedforwardLimitedSpeed = (availableVoltage - config.kS) / config.kV;
-  //   return Math.min(config.maxWheelSpeed, feedforwardLimitedSpeed);
-  // }
+    boolean[] skidding =
+        wheelSkidDetector.detectSkid(modulePositions, previousChassisCommand, speeds);
+    boolean anySkid = false;
 
-  /** Returns the most recent body frame command used for the modules. */
-  public ChassisSpeeds getCurrentBodyCommand() {
-    return currentChassisCommand;
-  }
-
-  /** Returns the robot pose estimated by odometry and vision fusion. */
-  public Pose2d getEstimatedRobotPose() {
-    return poseTracker.estimatedPose;
-  }
-
-  /**
-   * Actively hold the robot in an X-lock configuration by commanding each wheel to ±45° and zero
-   * drive voltage. This increases static friction to resist external forces.
-   */
-  public void engageXLock() {
-    final double[] xLockAngles = {Math.PI / 4.0, -Math.PI / 4.0, -Math.PI / 4.0, Math.PI / 4.0};
     for (int i = 0; i < swerveModules.length; i++) {
-      swerveModules[i].io.setSteerTargetAngleRad(xLockAngles[i]);
-      swerveModules[i].io.setDriveVoltage(0.0);
+      swerveModules[i].ignoreForOdom = skidding[i];
+      anySkid |= skidding[i];
     }
+
+    // If skidding, distrust odometry (Increase Uncertainty)
+    if (anySkid) poseTracker.setUncertainty(0.1);
+    else poseTracker.setUncertainty(0.02);
+  }
+
+  private void applyModuleState(int index, ModuleState desiredState) {
+    SwerveModule mod = swerveModules[index];
+
+    // Optimization: +- 180 degree logic
+    ModuleState optimized =
+        SwerveKinematics.optimize(desiredState, new Rotation2d(mod.io.getSteerAngleRad()));
+
+    // Set Angle
+    mod.io.setSteerTargetAngleRad(optimized.angle.getRadians());
+
+    // Calculate Feedforward + Feedback
+    double currentSpeed = mod.io.getDriveVelocityMps();
+    double accel = (optimized.speedMps - mod.lastDriveMps) / config.dt;
+
+    double ff =
+        (SwerveUtil.sign(optimized.speedMps) * config.kS)
+            + (config.kV * optimized.speedMps)
+            + (config.kA * accel);
+
+    double pid = config.kPSpeed * (optimized.speedMps - currentSpeed);
+
+    mod.io.setDriveVoltage(ff + pid);
+    mod.lastDriveMps = optimized.speedMps;
+  }
+
+  public Pose2d getEstimatedRobotPose() {
+    return poseTracker.get();
+  }
+
+  public void stopAllModules() {
+    for (SwerveModule m : swerveModules) m.io.setDriveVoltage(0.0);
     currentChassisCommand = new ChassisSpeeds();
   }
 
-  /** Immediately stops driving all modules by zeroing drive voltage. */
-  public void stopAllModules() {
-    for (SwerveModule module : swerveModules) {
-      module.io.setDriveVoltage(0.0);
+  public void engageXLock() {
+    double[] angles = {Math.PI / 4, -Math.PI / 4, -Math.PI / 4, Math.PI / 4};
+    for (int i = 0; i < 4; i++) {
+      swerveModules[i].io.setSteerTargetAngleRad(angles[i]);
+      swerveModules[i].io.setDriveVoltage(0.0);
     }
     currentChassisCommand = new ChassisSpeeds();
   }

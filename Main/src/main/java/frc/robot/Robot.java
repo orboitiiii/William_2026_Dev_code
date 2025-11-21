@@ -1,7 +1,3 @@
-// Copyright (c) FIRST and other WPILib contributors.
-// Open Source Software; you can modify and/or share it under the terms of
-// the WPILib BSD license file in the root directory of this project.
-
 package frc.robot;
 
 import edu.wpi.first.wpilibj.DriverStation;
@@ -16,24 +12,19 @@ public class Robot extends TimedRobot {
   public RobotOperatingContext robotContext;
   public RobotIntentState desired;
 
-  public Robot() {}
-
   @Override
-  public void robotInit() {}
-
-  @Override
-  public void driverStationConnected() {}
-
-  @Override
-  public void robotPeriodic() {
-    robotContext = subs.readContext();
+  public void robotInit() {
+    // Initialization logic if needed
   }
 
   @Override
-  public void autonomousInit() {}
+  public void robotPeriodic() {
+    // Update Sensors & Odometry (State Estimation)
+    subs.periodic();
 
-  @Override
-  public void autonomousPeriodic() {}
+    // Read Inputs & Context (Perception)
+    robotContext = subs.readContext();
+  }
 
   @Override
   public void teleopInit() {
@@ -42,7 +33,10 @@ public class Robot extends TimedRobot {
 
   @Override
   public void teleopPeriodic() {
+    // Determine Intent (Planning)
     desired = decideRobotState(robotContext);
+
+    // Execute Subsystems (Control)
     subs.operate(desired, robotContext);
   }
 
@@ -55,18 +49,6 @@ public class Robot extends TimedRobot {
   public void disabledPeriodic() {
     subs.operate(desired, robotContext);
   }
-
-  @Override
-  public void disabledExit() {}
-
-  @Override
-  public void testInit() {}
-
-  @Override
-  public void testPeriodic() {}
-
-  @Override
-  public void testExit() {}
 
   public RobotIntentState decideRobotState(RobotOperatingContext ctx) {
     if (DriverStation.isDisabled()) return RobotIntentState.DISABLED;

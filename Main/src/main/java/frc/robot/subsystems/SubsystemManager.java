@@ -1,8 +1,8 @@
-// ================= SubsystemManager =================
 package frc.robot.subsystems;
 
 import edu.wpi.first.math.kinematics.ChassisSpeeds;
 import edu.wpi.first.wpilibj.PS5Controller;
+import frc.robot.lib.core.RobotIntentState;
 import frc.robot.lib.core.RobotOperatingContext;
 import frc.robot.lib.core.StateDrivenSubsystem;
 import frc.robot.lib.swerve.SwerveController;
@@ -13,9 +13,10 @@ import frc.robot.subsystems.driveTrain.SwerveConstants.DriveConstants;
 import frc.robot.subsystems.driveTrain.SwerveConstants.OIConstants;
 import frc.robot.subsystems.driveTrain.SwerveSubsystem;
 import java.util.Arrays;
+import java.util.Optional;
 
 public class SubsystemManager {
-  // FL, FR, RL, RR
+
   private final SparkMaxModuleIO[] moduleIo =
       new SparkMaxModuleIO[] {
         new SparkMaxModuleIO(
@@ -42,7 +43,8 @@ public class SubsystemManager {
   private final SwerveController swerveController =
       new SwerveController(DriveConstants.swerveConfig, modules);
 
-  private final Pigeon2Gyro gyro = new Pigeon2Gyro(0, null, false);
+  // Assume "rio" as default bus, adjust if using CANivore
+  private final Pigeon2Gyro gyro = new Pigeon2Gyro(0, "rio");
 
   private final SwerveSubsystem swerveSubsystem = new SwerveSubsystem(swerveController, gyro);
 
@@ -51,19 +53,31 @@ public class SubsystemManager {
   private final StateDrivenSubsystem<?>[] subsystems =
       new StateDrivenSubsystem<?>[] {swerveSubsystem};
 
-  public RobotOperatingContext readContext() {
-    double vx =
-        applyDeadband(driver.getLeftY())
-            * DriveConstants.kMaxSpeedMetersPerSecond; // PS5 forward is negative
-    double vy = applyDeadband(driver.getLeftX()) * DriveConstants.kMaxSpeedMetersPerSecond;
-    double w = applyDeadband(driver.getRightX()) * DriveConstants.kMaxAngularSpeed;
-
-    return new RobotOperatingContext(new ChassisSpeeds(vx, vy, w), () -> swerveSubsystem.getPose());
+  /**
+   * This method MUST be called at the beginning of every robot cycle (RobotPeriodic). It updates
+   * the "State of the World" (Odometry, Sensor Inputs) before any logic runs.
+   */
+  public void periodic() {
+    // Update Odometry with no vision data for now (pass empty optionals)
+    // In the future, VisionSubsystem data would be injected here.
+    swerveSubsystem.updateOdometry(Optional.empty(), Optional.empty(), 0.0);
   }
 
-  public void operate(frc.robot.lib.core.RobotIntentState desired, RobotOperatingContext ctx) {
-    for (StateDrivenSubsystem<?> node : subsystems) {
-      node.operate(desired, ctx);
+  public RobotOperatingContext readContext() {
+    // Inputs should be raw but conditioned (deadbanded)
+    // Coordinate System: Forward is +X (Joystick -Y), Left is +Y (Joystick -X)
+    double vx = applyDeadband(-driver.getLeftY()) * DriveConstants.kMaxSpeedMetersPerSecond;
+    double vy = applyDeadband(-driver.getLeftX()) * DriveConstants.kMaxSpeedMetersPerSecond;
+    double omega = applyDeadband(-driver.getRightX()) * DriveConstants.kMaxAngularSpeed;
+
+    // Create the context with the LATEST pose (updated in periodic())
+    return new RobotOperatingContext(
+        new ChassisSpeeds(vx, vy, omega), () -> swerveSubsystem.getPose());
+  }
+
+  public void operate(RobotIntentState desired, RobotOperatingContext ctx) {
+    for (StateDrivenSubsystem<?> subsystem : subsystems) {
+      subsystem.operate(desired, ctx);
     }
   }
 
@@ -72,7 +86,7 @@ public class SubsystemManager {
     if (magnitude < OIConstants.kDriveDeadband) {
       return 0.0;
     }
-    double scaled = (magnitude - OIConstants.kDriveDeadband) / (1.0 - OIConstants.kDriveDeadband);
-    return Math.copySign(Math.min(1.0, scaled), value);
+    return Math.copySign(
+        (magnitude - OIConstants.kDriveDeadband) / (1.0 - OIConstants.kDriveDeadband), value);
   }
 }
