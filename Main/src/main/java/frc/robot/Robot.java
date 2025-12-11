@@ -1,23 +1,24 @@
 package frc.robot;
 
+import edu.wpi.first.wpilibj.DriverStation;
+import edu.wpi.first.wpilibj.DriverStation.Alliance;
 import edu.wpi.first.wpilibj.TimedRobot;
 import edu.wpi.first.wpilibj.Timer;
 import frc.robot.framework.Looper;
 import frc.robot.framework.SubsystemManager;
 import frc.robot.subsystems.Drive;
-import frc.robot.subsystems.Shooter;
 
 public class Robot extends TimedRobot {
   private final Looper mEnabledLooper = new Looper();
   private final Looper mDisabledLooper = new Looper();
   private final SubsystemManager mSubsystemManager = SubsystemManager.getInstance();
 
-  private final Shooter mShooter = Shooter.getInstance();
   private final Drive mDrive = Drive.getInstance();
+  private final DashboardState mDashboard = DashboardState.getInstance();
 
   public Robot() {
     // Register subsystems
-    mSubsystemManager.setSubsystems(mDrive, mShooter);
+    mSubsystemManager.setSubsystems(mDrive);
 
     // Register loops
     mSubsystemManager.registerEnabledLoops(mEnabledLooper);
@@ -37,20 +38,20 @@ public class Robot extends TimedRobot {
   public void robotPeriodic() {
     // The Rigorous Cycle: Read -> Process (in Looper) -> Write
     mSubsystemManager.readPeriodicInputs();
-
-    // Looper is running in background (notifier), or we can run it here manually if we didn't use
-    // Notifier.
-    // Our Looper uses Notifier, so it runs parallel.
-    // Note: 254 sometimes runs enabledLooper.onLoop() here for strictly synchronous behavior.
-    // But our Looper.java uses a Notifier.
-    // To strictly follow Read-Process-Write, we need to ensure thread safety or synchronization.
-    // Standard 254: Read (here), Loop (Notifier), Write (here).
-
     mSubsystemManager.outputTelemetry();
     mSubsystemManager.writePeriodicOutputs();
 
-    mEnabledLooper.outputToSmartDashboard();
-    RobotState.getInstance().outputToSmartDashboard();
+    // mEnabledLooper.outputToSmartDashboard(); // Removed in favor of single struct
+    // RobotState.getInstance().outputToSmartDashboard(); // Removed in favor of single struct
+
+    // Update Global Dashboard State
+    mDashboard.matchTime = Timer.getMatchTime();
+    mDashboard.isRedAlliance =
+        DriverStation.getAlliance().isPresent()
+            && DriverStation.getAlliance().get() == Alliance.Red;
+
+    // Publish All
+    mDashboard.publish();
   }
 
   @Override
@@ -60,15 +61,7 @@ public class Robot extends TimedRobot {
   }
 
   @Override
-  public void teleopPeriodic() {
-    // Teleop specific code
-
-    // Drive Control (Split Arcade / Field Relative)
-    // Note: In a real robot, we would use a ControlBoard/Joystick class
-    // For now, assume placeholders
-    // mDrive.setTeleopInputs(-controller.getLeftY(), -controller.getLeftX(),
-    // -controller.getRightX(), true);
-  }
+  public void teleopPeriodic() {}
 
   @Override
   public void autonomousInit() {
@@ -77,9 +70,7 @@ public class Robot extends TimedRobot {
   }
 
   @Override
-  public void autonomousPeriodic() {
-    // Auto logic
-  }
+  public void autonomousPeriodic() {}
 
   @Override
   public void disabledInit() {

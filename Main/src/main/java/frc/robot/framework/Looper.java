@@ -5,7 +5,7 @@ import java.util.List;
 
 import edu.wpi.first.wpilibj.Notifier;
 import edu.wpi.first.wpilibj.Timer;
-import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
+import frc.robot.DashboardState;
 
 /**
  * This code runs all of the robot's loops. Loop objects are stored in a List object. They are
@@ -91,7 +91,7 @@ public class Looper implements ILoop {
   }
 
   public void outputToSmartDashboard() {
-    SmartDashboard.putNumber("looper_dt", mDt);
+    DashboardState.getInstance().looperDt = mDt;
   }
 
   public synchronized void register(ILoop loop) {

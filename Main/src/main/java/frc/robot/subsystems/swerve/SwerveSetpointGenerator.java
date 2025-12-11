@@ -1,142 +1,74 @@
 package frc.robot.subsystems.swerve;
 
+import edu.wpi.first.math.geometry.Rotation2d;
+import edu.wpi.first.math.geometry.Translation2d;
 import edu.wpi.first.math.kinematics.ChassisSpeeds;
 import edu.wpi.first.math.kinematics.SwerveDriveKinematics;
 import edu.wpi.first.math.kinematics.SwerveModuleState;
 import frc.robot.Constants;
 
 /**
- * Takes desired ChassisSpeeds and limits them based on physical constraints (Anti-Slip logic
- * inspired by Orbit 1690).
+ * 1690-Style Kinematic Feasibility Filter. This class ensures that the requested module states are
+ * physically possible given the robot's mass, motor torque, and tire friction.
  */
 public class SwerveSetpointGenerator {
   private final SwerveDriveKinematics mKinematics;
 
+  // Store the LAST commanded state to calculate acceleration
+  private SwerveModuleState[] mPrevSetpoint;
+
   public SwerveSetpointGenerator(SwerveDriveKinematics kinematics) {
     mKinematics = kinematics;
+    // Initialize with zeros
+    mPrevSetpoint = new SwerveModuleState[4];
+    for (int i = 0; i < 4; i++) {
+      mPrevSetpoint[i] = new SwerveModuleState(0.0, new Rotation2d());
+    }
   }
 
-  /**
-   * Generates a feasible setpoint that prevents wheel slip.
-   *
-   * @param currentPose Current robot pose (for field-relative calculations if needed, but mainly
-   *     for curvature).
-   * @param desiredSpeeds The desired chassis speeds.
-   * @return Feasible SwerveModuleStates.
-   */
+  /** Main function: Takes desired speeds, returns FEASIBLE module states. */
   public SwerveModuleState[] generateSetpoint(ChassisSpeeds desiredSpeeds) {
-    // 1. Discretize (optional, but good for high speed)
-    // ChassisSpeeds discreteSpeeds = ChassisSpeeds.discretize(desiredSpeeds, Constants.kLooperDt);
-    // For now, let's stick to the anti-slip core.
 
-    ChassisSpeeds limitedSpeeds = limitAntiSlip(desiredSpeeds);
+    SwerveModuleState[] idealStates = mKinematics.toSwerveModuleStates(desiredSpeeds);
 
-    // 2. Inverse Kinematics
-    SwerveModuleState[] states = mKinematics.toSwerveModuleStates(limitedSpeeds);
+    for (int i = 0; i < 4; i++) {
+      idealStates[i].optimize(mPrevSetpoint[i].angle);
+    }
 
-    // 3. Desaturate wheel speeds
-    SwerveDriveKinematics.desaturateWheelSpeeds(states, Constants.Swerve.kMaxDriveVelocity);
+    SwerveModuleState[] feasibleStates = enforceFeasibility(idealStates, Constants.kLooperDt);
 
-    return states;
+    mPrevSetpoint = feasibleStates;
+
+    return feasibleStates;
   }
 
-  /**
-   * Limits the chassis speeds to prevent slipping. Logic: - Calculate curvature (kappa) = omega /
-   * v_linear - Max feasible velocity for this curvature: v_max = sqrt(mu * g * r) = sqrt(mu * g /
-   * kappa) - Cap v_linear to v_max.
-   */
-  private ChassisSpeeds limitAntiSlip(ChassisSpeeds speeds) {
-    double vx = speeds.vxMetersPerSecond;
-    double vy = speeds.vyMetersPerSecond;
-    double omega = speeds.omegaRadiansPerSecond;
+  private SwerveModuleState[] enforceFeasibility(SwerveModuleState[] idealStates, double dt) {
+    SwerveModuleState[] feasibleStates = new SwerveModuleState[4];
 
-    double linearVelocity = Math.hypot(vx, vy);
+    // Check for slip
+    double scaleFactor = SwerveSlipDetector.getSlipScalingFactor(mPrevSetpoint, idealStates, dt);
 
-    // If we are not moving or not turning, anti-slip for turning is not the primary concern
-    // (though linear accel is, but we assume the driver/profiler handles that mostly.
-    // This function focuses on Cornering Limit).
-    if (linearVelocity < 1e-3 || Math.abs(omega) < 1e-3) {
-      return speeds;
+    // Apply Scaling and Calculate Final States
+    for (int i = 0; i < 4; i++) {
+      // Re-calculate accel vector (redundant calculation but cleaner separation)
+      Translation2d vCurrent =
+          new Translation2d(mPrevSetpoint[i].speedMetersPerSecond, mPrevSetpoint[i].angle);
+      Translation2d vTarget =
+          new Translation2d(idealStates[i].speedMetersPerSecond, idealStates[i].angle);
+
+      Translation2d accel = vTarget.minus(vCurrent).div(dt);
+      Translation2d validAccel = accel.times(scaleFactor);
+
+      Translation2d vNext = vCurrent.plus(validAccel.times(dt));
+      feasibleStates[i] = new SwerveModuleState(vNext.getNorm(), vNext.getAngle());
     }
 
-    // Curvature k = omega / v
-    // Radius r = 1 / k = v / omega
-    double radius = Math.abs(linearVelocity / omega);
+    return feasibleStates;
+  }
 
-    // Max velocity before slipping due to centripetal force
-    // F_c = m * v^2 / r <= F_f = mu * m * g
-    // v^2 / r <= mu * g
-    // v <= sqrt(mu * g * r)
-    double maxFeasibleVelocity =
-        Math.sqrt(Constants.Swerve.kNormalFrictionCoefficient * 9.81 * radius);
-
-    if (linearVelocity > maxFeasibleVelocity) {
-      // Scale down the linear velocity vector to the limit
-      double scale = maxFeasibleVelocity / linearVelocity;
-      return new ChassisSpeeds(
-          vx * scale, vy * scale, omega); // Maintain omega to keep curvature same?
-      // If we reduce v, but keep omega, r decreases (r = v/w). Then v_max decreases further.
-      // Wait, if we slow down, we can turn strictly TIGHTER radius physically, OR
-      // for the SAME radius, we are safer.
-      // The constraint is v <= sqrt(mu*g*r).
-      // If we satisfy this, we are good.
-      // By scaling v down, new v' < v.
-      // If we keep omega same, new r' = v'/omega = scale * r.
-      // New max v' = sqrt(mu*g*r') = sqrt(mu*g*scale*r) = sqrt(scale) * v_max_old.
-      // Is v' <= sqrt(scale) * v_max_old?
-      // current v = maxFeasible. v' = scale * maxFeasible.
-      // scale * maxFeasible <= sqrt(scale) * maxFeasible -> scale <= sqrt(scale) -> scale^2 <=
-      // scale -> scale <= 1. OK.
-      // So scaling both v linearly works?
-
-      // Actually, usually we prioritize maintaining the path (curvature).
-      // So if we reduce V, we should generally reduce Omega?
-      // No, curvature = omega/v. If we scale BOTH vx,vy AND omega by 'scale', then curvature is
-      // CONSTANT.
-      // Path is preserved.
-      // v' = s*v, w' = s*w. r' = (s*v)/(s*w) = v/w = r.
-      // Max vel for radius r is still maxFeasibleVelocity.
-      // We reduced v to maxFeasibleVelocity.
-      // So we are safe.
-
-      // Re-calc:
-      // limitedSpeeds = new ChassisSpeeds(vx * scale, vy * scale, omega * scale);
+  public void reset() {
+    for (int i = 0; i < 4; i++) {
+      mPrevSetpoint[i] = new SwerveModuleState(0.0, new Rotation2d());
     }
-
-    // HOWEVER, Orbit slides often imply prioritizing Rotation or Translation?
-    // Usually, we just cap V.
-    // If we cap V but keep Omega, curvature increases (tighter turn).
-    // Tighter turn requires LOWER max velocity.
-    // It might be recursive.
-
-    // Let's implement the standard approach: "Slow down the robot if it's turning too fast for its
-    // speed (or moving too fast for its turn)."
-    // We select to clamp Linear Velocity to the max allowed for the CURRENT Radius defined by (V,
-    // Omega).
-    // If we reduce V ONLY, radius R decreases. The limit gets stricter.
-
-    // Better approach:
-    // Limit based on the acceleration budget?
-    // Friction circle: a_total^2 <= (mu*g)^2
-    // a_total = a_trans + a_centripetal
-    // a_centripetal = v*omega.
-    // This assumes steady state turning.
-
-    // Let's go with the v <= sqrt(mu*g*r) check and scale V down.
-    // If we scale V down, we reduce the centrifugal force.
-    // We will maintain Omega? If we maintain Omega, the robot turns "faster" relative to distance
-    // traveled.
-    // Drivers usually expect Omega to be satisfied?
-    // Actually, if we are slipping, we satisfy NEITHER.
-
-    // Decision: Scale BOTH v and omega to preserve curvature (path shape).
-    // If the driver commanded a specific arc, we traverse it slower.
-
-    if (linearVelocity > maxFeasibleVelocity) {
-      double scale = maxFeasibleVelocity / linearVelocity;
-      return new ChassisSpeeds(vx * scale, vy * scale, omega * scale);
-    }
-
-    return speeds;
   }
 }

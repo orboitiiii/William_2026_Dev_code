@@ -1,18 +1,20 @@
 package frc.robot.subsystems;
 
 import com.ctre.phoenix6.hardware.Pigeon2;
-
 import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.math.geometry.Rotation2d;
 import edu.wpi.first.math.kinematics.ChassisSpeeds;
+import edu.wpi.first.math.kinematics.SwerveDriveKinematics;
+import edu.wpi.first.math.kinematics.SwerveDriveOdometry;
+import edu.wpi.first.math.kinematics.SwerveModulePosition;
 import edu.wpi.first.math.kinematics.SwerveModuleState;
+import edu.wpi.first.wpilibj.Timer;
 import frc.robot.Constants;
-import frc.robot.RobotState;
+import frc.robot.DashboardState;
+import frc.robot.framework.ILoop;
 import frc.robot.framework.Looper;
 import frc.robot.framework.Subsystem;
-import frc.robot.subsystems.swerve.SwerveKinematics;
 import frc.robot.subsystems.swerve.SwerveModule;
-import frc.robot.subsystems.swerve.SwerveOdometry;
 import frc.robot.subsystems.swerve.SwerveSetpointGenerator;
 
 public class Drive extends Subsystem {
@@ -25,84 +27,128 @@ public class Drive extends Subsystem {
     return mInstance;
   }
 
-  // Hardware
+  public enum DriveMode {
+    MANUAL,
+    AUTO
+  }
+
+  public static class PeriodicIO {
+    // Inputs
+    public double timestamp;
+    public Rotation2d gyro_heading = new Rotation2d();
+    public SwerveModulePosition[] module_positions = new SwerveModulePosition[4];
+    public SwerveModuleState[] module_states = new SwerveModuleState[4];
+    public Pose2d odometry_pose = new Pose2d();
+
+    // Outputs
+    public SwerveModuleState[] curr_module_target_states =
+        new SwerveModuleState[] {
+          new SwerveModuleState(),
+          new SwerveModuleState(),
+          new SwerveModuleState(),
+          new SwerveModuleState()
+        };
+  }
+
   private final SwerveModule[] mModules;
-  private final Pigeon2 mPigeon; // 1690 Requirement
+  private final Pigeon2 mPigeon;
 
-  // Logic / Math
+  private final SwerveDriveKinematics mKinematics;
   private final SwerveSetpointGenerator mSetpointGenerator;
-  private final SwerveKinematics mKinematics;
-  private final SwerveOdometry mOdometry;
+  private final SwerveDriveOdometry mOdometry;
 
-  // Control State
-  private ChassisSpeeds mDesiredChassisSpeeds = new ChassisSpeeds();
+  private PeriodicIO mPeriodicIO = new PeriodicIO();
+  private DriveMode mVehicleMode = DriveMode.MANUAL;
+
+  private ChassisSpeeds mDesiredSpeeds = new ChassisSpeeds(0.0, 0.0, 0.0);
   private boolean mIsFieldRelative = true;
 
   private Drive() {
     mModules =
         new SwerveModule[] {
           new SwerveModule(
-              "FrontLeft",
+              "FL",
               Constants.Swerve.kFLDriveId,
               Constants.Swerve.kFLSteerId,
               Constants.Swerve.kFLEncoderId,
               Constants.Swerve.kFLOffset,
-              new edu.wpi.first.math.geometry.Translation2d(
-                  Constants.Swerve.kWheelBase / 2, Constants.Swerve.kTrackWidth / 2)),
+              Constants.Swerve.kFLPos),
           new SwerveModule(
-              "FrontRight",
+              "FR",
               Constants.Swerve.kFRDriveId,
               Constants.Swerve.kFRSteerId,
               Constants.Swerve.kFREncoderId,
               Constants.Swerve.kFROffset,
-              new edu.wpi.first.math.geometry.Translation2d(
-                  Constants.Swerve.kWheelBase / 2, -Constants.Swerve.kTrackWidth / 2)),
+              Constants.Swerve.kFRPos),
           new SwerveModule(
-              "BackLeft",
+              "BL",
               Constants.Swerve.kBLDriveId,
               Constants.Swerve.kBLSteerId,
               Constants.Swerve.kBLEncoderId,
               Constants.Swerve.kBLOffset,
-              new edu.wpi.first.math.geometry.Translation2d(
-                  -Constants.Swerve.kWheelBase / 2, Constants.Swerve.kTrackWidth / 2)),
+              Constants.Swerve.kBLPos),
           new SwerveModule(
-              "BackRight",
+              "BR",
               Constants.Swerve.kBRDriveId,
               Constants.Swerve.kBRSteerId,
               Constants.Swerve.kBREncoderId,
               Constants.Swerve.BROffset,
-              new edu.wpi.first.math.geometry.Translation2d(
-                  -Constants.Swerve.kWheelBase / 2, -Constants.Swerve.kTrackWidth / 2))
+              Constants.Swerve.kBRPos),
         };
 
     mPigeon = new Pigeon2(Constants.Swerve.kPigeonId, Constants.Swerve.kCanivoreBusName);
-
-    mKinematics = new SwerveKinematics();
-    mSetpointGenerator =
-        new SwerveSetpointGenerator(
-            Constants.Swerve
-                .kKinematics); // Note: SetpointGen assumes standard kinematics for limits for now.
-
-    // Initialize Odometry
+    mKinematics =
+        new SwerveDriveKinematics(
+            Constants.Swerve.kFLPos,
+            Constants.Swerve.kFRPos,
+            Constants.Swerve.kBLPos,
+            Constants.Swerve.kBRPos);
+    mSetpointGenerator = new SwerveSetpointGenerator(mKinematics);
     mOdometry =
-        new SwerveOdometry(
-            mKinematics,
-            new Pose2d(),
-            Rotation2d.fromDegrees(mPigeon.getYaw().getValueAsDouble()),
-            getModuleDistances());
+        new SwerveDriveOdometry(mKinematics, new Rotation2d(), getModulePositions(), new Pose2d());
   }
 
   @Override
-  public void registerEnabledLoops(Looper in) {
-    in.register(
-        new frc.robot.framework.ILoop() {
+  public synchronized void readPeriodicInputs() {
+    mPeriodicIO.timestamp = Timer.getFPGATimestamp();
+    mPeriodicIO.gyro_heading = Rotation2d.fromDegrees(mPigeon.getYaw().getValueAsDouble());
+
+    for (int i = 0; i < 4; i++) {
+      mPeriodicIO.module_positions[i] = mModules[i].getPosition();
+      mPeriodicIO.module_states[i] = mModules[i].getState();
+    }
+
+    mOdometry.update(mPeriodicIO.gyro_heading, mPeriodicIO.module_positions);
+    mPeriodicIO.odometry_pose = mOdometry.getPoseMeters();
+
+    // Push to RobotState history for vision latency compensation
+    frc.robot.RobotState.getInstance()
+        .addFieldToVehicleObservation(mPeriodicIO.timestamp, mPeriodicIO.odometry_pose);
+  }
+
+  @Override
+  public synchronized void writePeriodicOutputs() {
+    for (int i = 0; i < 4; i++) {
+      mModules[i].setDesiredState(mPeriodicIO.curr_module_target_states[i], false);
+    }
+  }
+
+  @Override
+  public void registerEnabledLoops(Looper enabledLooper) {
+    enabledLooper.register(
+        new ILoop() {
           @Override
-          public void onStart(double timestamp) {}
+          public void onStart(double timestamp) {
+            synchronized (Drive.this) {
+              mVehicleMode = DriveMode.MANUAL;
+              mSetpointGenerator.reset();
+            }
+          }
 
           @Override
           public void onLoop(double timestamp) {
             synchronized (Drive.this) {
-              updateModuleStates();
+              handleState();
             }
           }
 
@@ -113,124 +159,75 @@ public class Drive extends Subsystem {
         });
   }
 
-  private synchronized void updateModuleStates() {
-    // Discretization / Skew Compensation (1690: "Predict dt ahead")
-    // theta_future = theta_now + omega * dt
-    double dt = Constants.kLooperDt;
-    Rotation2d currentHeading = Rotation2d.fromDegrees(mPigeon.getYaw().getValueAsDouble());
-    Rotation2d predictedHeading =
-        currentHeading.plus(
-            Rotation2d.fromRadians(mDesiredChassisSpeeds.omegaRadiansPerSecond * dt));
+  private void handleState() {
+    switch (mVehicleMode) {
+      case MANUAL:
+        updateManual();
+        break;
+      case AUTO:
+        updateAuto();
+        break;
+      default:
+        break;
+    }
+  }
 
-    ChassisSpeeds robotRelativeSpeeds;
+  private void updateManual() {
+    ChassisSpeeds robotSpeeds = mDesiredSpeeds;
     if (mIsFieldRelative) {
-      // Use PREDICTED heading for field->robot conversion to compensate for skew
-      robotRelativeSpeeds =
-          ChassisSpeeds.fromFieldRelativeSpeeds(
-              mDesiredChassisSpeeds.vxMetersPerSecond,
-              mDesiredChassisSpeeds.vyMetersPerSecond,
-              mDesiredChassisSpeeds.omegaRadiansPerSecond,
-              predictedHeading);
-    } else {
-      robotRelativeSpeeds = mDesiredChassisSpeeds;
+      robotSpeeds = ChassisSpeeds.fromFieldRelativeSpeeds(mDesiredSpeeds, mPeriodicIO.gyro_heading);
     }
 
-    // Anti-Slip Logic (Limit speeds based on physics)
-    // Note: SetpointGenerator currently accepts ChassisSpeeds.
-    // We might want to pass robotRelativeSpeeds there.
-    SwerveModuleState[] logicalStates = mKinematics.toSwerveModuleStates(robotRelativeSpeeds);
+    mPeriodicIO.curr_module_target_states = mSetpointGenerator.generateSetpoint(robotSpeeds);
+  }
 
-    // Send to modules (Cosine Scaling is inside SwerveModule)
-    for (int i = 0; i < 4; i++) {
-      mModules[i].setDesiredState(logicalStates[i], false); // Open loop for now
+  private void updateAuto() {
+    ChassisSpeeds robotSpeeds = mDesiredSpeeds;
+    if (mIsFieldRelative) {
+      robotSpeeds = ChassisSpeeds.fromFieldRelativeSpeeds(mDesiredSpeeds, mPeriodicIO.gyro_heading);
     }
+    // Placeholder for path following logic
+    mPeriodicIO.curr_module_target_states = mSetpointGenerator.generateSetpoint(robotSpeeds);
   }
 
   @Override
-  public synchronized void readPeriodicInputs() {
-    // Custom Odometry Update
-    Rotation2d gyroAngle = Rotation2d.fromDegrees(mPigeon.getYaw().getValueAsDouble());
-    double gyroRate =
-        edu.wpi.first.math.util.Units.degreesToRadians(
-            mPigeon.getAngularVelocityZWorld().getValueAsDouble());
-
-    double[] distances = getModuleDistances();
-    Rotation2d[] angles = getModuleAngles();
-    double[] velocities = getModuleVelocities();
-
-    mOdometry.update(gyroAngle, distances, angles, velocities, gyroRate);
-
-    // Push to Single Source of Truth
-    RobotState.getInstance()
-        .setFieldToVehicle(
-            mOdometry.getClass().equals(SwerveOdometry.class)
-                ? ((SwerveOdometry) mOdometry)
-                    .update(gyroAngle, distances, angles, velocities, gyroRate)
-                : new Pose2d());
-    // Note: The above line is a bit hacky due to return structure, fixed below:
-  }
-
-  // Fixed method for clean read
-  public void updateOdometry() {
-    Rotation2d gyroAngle = Rotation2d.fromDegrees(mPigeon.getYaw().getValueAsDouble());
-    double gyroRate =
-        edu.wpi.first.math.util.Units.degreesToRadians(
-            mPigeon.getAngularVelocityZWorld().getValueAsDouble());
-
-    Pose2d pose =
-        mOdometry.update(
-            gyroAngle, getModuleDistances(), getModuleAngles(), getModuleVelocities(), gyroRate);
-    RobotState.getInstance().setFieldToVehicle(pose);
-  }
-
-  @Override
-  public synchronized void writePeriodicOutputs() {
-    // No explicit flush needed for Phoenix 6 usually
+  public void checkSystem() {
+    // Implement system checks (e.g. iterate modules and check for faults)
   }
 
   @Override
   public void outputTelemetry() {
-    RobotState.getInstance().outputToSmartDashboard();
+    var dashboard = DashboardState.getInstance();
+    dashboard.driveMode = (mVehicleMode == DriveMode.MANUAL) ? 0 : 1;
+    dashboard.driveHeadingDegrees = mPeriodicIO.gyro_heading.getDegrees();
+    dashboard.robotPose = mPeriodicIO.odometry_pose;
+  }
+
+  @Override
+  public void stop() {
+    mDesiredSpeeds = new ChassisSpeeds(0, 0, 0);
   }
 
   @Override
   public void zeroSensors() {
     mPigeon.setYaw(0);
-    mOdometry.resetPosition(new Pose2d(), Rotation2d.fromDegrees(0), getModuleDistances());
+    mOdometry.resetPosition(mPeriodicIO.gyro_heading, getModulePositions(), new Pose2d());
+    readPeriodicInputs();
   }
 
-  @Override
-  public void checkSystem() {}
-
-  @Override
-  public synchronized void stop() {
-    mDesiredChassisSpeeds = new ChassisSpeeds(0, 0, 0);
-    for (SwerveModule mod : mModules) {
-      mod.stop();
-    }
-  }
-
-  public synchronized void setTeleopInputs(
-      double vx, double vy, double omega, boolean fieldRelative) {
-    mDesiredChassisSpeeds = new ChassisSpeeds(vx, vy, omega);
+  public synchronized void setDesiredSpeeds(ChassisSpeeds desireSpeeds, boolean fieldRelative) {
+    mDesiredSpeeds = desireSpeeds;
     mIsFieldRelative = fieldRelative;
   }
 
-  private double[] getModuleDistances() {
-    double[] dists = new double[4];
-    for (int i = 0; i < 4; i++) dists[i] = mModules[i].getPosition().distanceMeters;
-    return dists;
+  // Helper for initialization only
+  private SwerveModulePosition[] getModulePositions() {
+    SwerveModulePosition[] pos = new SwerveModulePosition[4];
+    for (int i = 0; i < 4; i++) pos[i] = mModules[i].getPosition();
+    return pos;
   }
 
-  private Rotation2d[] getModuleAngles() {
-    Rotation2d[] angs = new Rotation2d[4];
-    for (int i = 0; i < 4; i++) angs[i] = mModules[i].getSteerAngle();
-    return angs;
-  }
-
-  private double[] getModuleVelocities() {
-    double[] vels = new double[4];
-    for (int i = 0; i < 4; i++) vels[i] = mModules[i].getState().speedMetersPerSecond;
-    return vels;
+  public synchronized Rotation2d getHeading() {
+    return mPeriodicIO.gyro_heading;
   }
 }

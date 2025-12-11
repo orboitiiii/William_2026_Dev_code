@@ -1,12 +1,11 @@
 package frc.robot.subsystems.swerve;
 
-import com.ctre.phoenix6.configs.TalonFXConfiguration;
 import com.ctre.phoenix6.controls.DutyCycleOut;
 import com.ctre.phoenix6.controls.PositionVoltage;
 import com.ctre.phoenix6.controls.VelocityVoltage;
 import com.ctre.phoenix6.hardware.CANcoder;
 import com.ctre.phoenix6.hardware.TalonFX;
-import com.ctre.phoenix6.signals.NeutralModeValue;
+
 import edu.wpi.first.math.geometry.Rotation2d;
 import edu.wpi.first.math.geometry.Translation2d;
 import edu.wpi.first.math.kinematics.SwerveModulePosition;
@@ -42,39 +41,14 @@ public class SwerveModule {
     mSteerMotor = new TalonFX(steerId, Constants.Swerve.kCanivoreBusName);
     mCANCoder = new CANcoder(cancoderId, Constants.Swerve.kCanivoreBusName);
 
-    configureDevices();
-  }
-
-  private void configureDevices() {
-    var driveConfig = new TalonFXConfiguration();
-    driveConfig.MotorOutput.NeutralMode = NeutralModeValue.Brake;
-    driveConfig.Slot0.kP = 0.1; // TODO: Tune
-    driveConfig.Slot0.kI = 0.0;
-    driveConfig.Slot0.kD = 0.0;
-    driveConfig.Slot0.kV = 0.12; // TODO: Tune
-    driveConfig.CurrentLimits.SupplyCurrentLimit = 60.0;
-    driveConfig.CurrentLimits.SupplyCurrentLimitEnable = true;
-    driveConfig.Feedback.SensorToMechanismRatio = Constants.Swerve.kDriveGearRatio;
-
-    var steerConfig = new TalonFXConfiguration();
-    steerConfig.MotorOutput.NeutralMode = NeutralModeValue.Brake;
-    steerConfig.Slot0.kP = 2.0; // TODO: Tune
-    steerConfig.Slot0.kI = 0.0;
-    steerConfig.Slot0.kD = 0.0;
-    steerConfig.CurrentLimits.SupplyCurrentLimit = 40.0;
-    steerConfig.CurrentLimits.SupplyCurrentLimitEnable = true;
-    steerConfig.ClosedLoopGeneral.ContinuousWrap = true;
-    steerConfig.Feedback.SensorToMechanismRatio = Constants.Swerve.kSteerGearRatio;
-
-    mDriveMotor.getConfigurator().apply(driveConfig);
-    mSteerMotor.getConfigurator().apply(steerConfig);
+    SwerveModuleConfigurator.configure(mDriveMotor, mSteerMotor, mCANCoder, mCANCoderOffset);
   }
 
   public synchronized void setDesiredState(SwerveModuleState state, boolean isOpenLoop) {
     // Optimize first
     state.optimize(getSteerAngle());
 
-    // 1690 Cosine Scaling: Speed_out = Speed_req * cos(Error)
+    // Speed_out = Speed_req * cos(Error)
     Rotation2d currentAngle = getSteerAngle();
     Rotation2d error = state.angle.minus(currentAngle);
     double cosineScalar = error.getCos();
