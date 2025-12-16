@@ -60,7 +60,13 @@ public class SwerveSetpointGenerator {
       Translation2d validAccel = accel.times(scaleFactor);
 
       Translation2d vNext = vCurrent.plus(validAccel.times(dt));
-      feasibleStates[i] = new SwerveModuleState(vNext.getNorm(), vNext.getAngle());
+
+      Rotation2d nextAngle = mPrevSetpoint[i].angle;
+      if (vNext.getNorm() > 1e-6) {
+        nextAngle = vNext.getAngle();
+      }
+
+      feasibleStates[i] = new SwerveModuleState(vNext.getNorm(), nextAngle);
     }
 
     return feasibleStates;

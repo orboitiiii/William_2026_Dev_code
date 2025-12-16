@@ -61,7 +61,17 @@ public class Robot extends TimedRobot {
   }
 
   @Override
-  public void teleopPeriodic() {}
+  public void teleopPeriodic() {
+    var translation = ControlBoard.getInstance().getTranslation();
+    var rotation = ControlBoard.getInstance().getRotation();
+    boolean resetGyro = ControlBoard.getInstance().getZeroGyro();
+
+    if (resetGyro) {
+      mDrive.zeroSensors();
+    }
+
+    mDrive.setOpenLoop(translation, rotation, true);
+  }
 
   @Override
   public void autonomousInit() {

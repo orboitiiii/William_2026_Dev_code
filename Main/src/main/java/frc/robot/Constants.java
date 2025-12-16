@@ -36,30 +36,47 @@ public final class Constants {
     public static final double kMaxAngularVelocity = 10.0; // rad/s
 
     // Gear Ratios
-    public static final double kDriveGearRatio = 6.12;
-    public static final double kSteerGearRatio = 15.43;
+    public static enum SwerveModuleType {
+      MK5N_L1(8.14, 287.0 / 11.0),
+      MK5N_L2(6.75, 287.0 / 11.0),
+      MK5N_L3(6.12, 287.0 / 11.0);
+
+      public final double driveRatio;
+      public final double steerRatio;
+
+      SwerveModuleType(double drive, double steer) {
+        this.driveRatio = drive;
+        this.steerRatio = steer;
+      }
+    }
+
+    // Active Configuration (User Select Here)
+    public static final SwerveModuleType kModuleType = SwerveModuleType.MK5N_L3; // Default to L2
+
+    public static final double kDriveGearRatio = kModuleType.driveRatio;
+    public static final double kSteerGearRatio = kModuleType.steerRatio;
 
     // CAN IDs & Offsets (Keep your existing values)
-    public static final int kFLDriveId = 1;
-    public static final int kFLSteerId = 2;
-    public static final int kFLEncoderId = 3;
+    public static final int kFLDriveId = 5;
+    public static final int kFLSteerId = 1;
+    public static final int kFLEncoderId = 9;
     public static final double kFLOffset = 0.0;
 
-    public static final int kFRDriveId = 4;
-    public static final int kFRSteerId = 5;
-    public static final int kFREncoderId = 6;
+    public static final int kFRDriveId = 7;
+    public static final int kFRSteerId = 3;
+    public static final int kFREncoderId = 11;
     public static final double kFROffset = 0.0;
 
-    public static final int kBLDriveId = 7;
-    public static final int kBLSteerId = 8;
-    public static final int kBLEncoderId = 9;
+    public static final int kBLDriveId = 8;
+    public static final int kBLSteerId = 4;
+    public static final int kBLEncoderId = 12;
     public static final double kBLOffset = 0.0;
 
-    public static final int kBRDriveId = 10;
-    public static final int kBRSteerId = 11;
-    public static final int kBREncoderId = 12;
+    public static final int kBRDriveId = 6;
+    public static final int kBRSteerId = 2;
+    public static final int kBREncoderId = 10;
     public static final double BROffset = 0.0;
 
-    public static final int kPigeonId = 13;
+    public static final int kPigeonId = 15;
   }
 }

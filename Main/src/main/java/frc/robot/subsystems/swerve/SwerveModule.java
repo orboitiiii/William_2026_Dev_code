@@ -37,16 +37,16 @@ public class SwerveModule {
     mCANCoderOffset = offset;
     mLocation = location;
 
-    mDriveMotor = new TalonFX(driveId, Constants.Swerve.kCanivoreBusName);
-    mSteerMotor = new TalonFX(steerId, Constants.Swerve.kCanivoreBusName);
-    mCANCoder = new CANcoder(cancoderId, Constants.Swerve.kCanivoreBusName);
+    mDriveMotor = new TalonFX(driveId);
+    mSteerMotor = new TalonFX(steerId);
+    mCANCoder = new CANcoder(cancoderId);
 
     SwerveModuleConfigurator.configure(mDriveMotor, mSteerMotor, mCANCoder, mCANCoderOffset);
   }
 
   public synchronized void setDesiredState(SwerveModuleState state, boolean isOpenLoop) {
     // Optimize first
-    state.optimize(getSteerAngle());
+    state = SwerveModuleState.optimize(state, getSteerAngle());
 
     // Speed_out = Speed_req * cos(Error)
     Rotation2d currentAngle = getSteerAngle();

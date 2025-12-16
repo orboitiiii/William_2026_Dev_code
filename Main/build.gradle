@@ -2,11 +2,52 @@ plugins {
     id "java"
     id "edu.wpi.first.GradleRIO" version "2025.3.2"
     id "com.diffplug.spotless" version "7.2.1"
+    id "cpp"
 }
 
 java {
     sourceCompatibility = JavaVersion.VERSION_17
     targetCompatibility = JavaVersion.VERSION_17
+}
+
+model {
+    platforms {
+        x64 {
+            architecture "x86_64"
+        }
+    }
+    components {
+        Team9427JNI(NativeLibrarySpec) {
+             targetPlatform "x64"
+             sources {
+                 cpp {
+                     source {
+                         srcDirs 'src/main/cpp'
+                         include 'Team9427JNI.cpp'
+                         exportedHeaders {
+                             srcDir 'src/main/cpp'
+                             srcDir 'src/main/cpp/include'
+                             srcDir 'src/main/cpp/include/Eigen'
+                         }
+                     }
+                 }
+             }
+            binaries.all {
+                // Define JNI include paths relative to JAVA_HOME
+                def javaHome = System.getenv("JAVA_HOME")
+                if (javaHome) {
+                    cppCompiler.args "-I${javaHome}/include"
+                    if (org.gradle.internal.os.OperatingSystem.current().isWindows()) {
+                         cppCompiler.args "-I${javaHome}/include/win32"
+                    } else if (org.gradle.internal.os.OperatingSystem.current().isLinux()) {
+                         cppCompiler.args "-I${javaHome}/include/linux"
+                    } else if (org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
+                         cppCompiler.args "-I${javaHome}/include/darwin"
+                    }
+                }
+            }
+        }
+    }
 }
 
 def ROBOT_MAIN_CLASS = "frc.robot.Main"
@@ -94,3 +135,21 @@ wpi.java.configureTestTasks(test)
 tasks.withType(JavaCompile) {
     options.compilerArgs.add '-XDstringConcat=inline'
 }
+
+task runSimulation(type: JavaExec) {
+    dependsOn 'assemble'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'frc.robot.libraries.lib9427.simulation.ControlLoopSimulation'
+    systemProperty 'java.library.path', file('build/libs/Team9427JNI/shared/release').absolutePath
+}
+
+
+
+
+
+
+
+
+
+
+

@@ -3,6 +3,8 @@ package frc.robot.subsystems.swerve;
 import com.ctre.phoenix6.configs.TalonFXConfiguration;
 import com.ctre.phoenix6.hardware.CANcoder;
 import com.ctre.phoenix6.hardware.TalonFX;
+import com.ctre.phoenix6.signals.FeedbackSensorSourceValue;
+import com.ctre.phoenix6.signals.InvertedValue;
 import com.ctre.phoenix6.signals.NeutralModeValue;
 
 import frc.robot.Constants;
@@ -23,26 +25,29 @@ public class SwerveModuleConfigurator {
 
     var steerConfig = new TalonFXConfiguration();
     steerConfig.MotorOutput.NeutralMode = NeutralModeValue.Brake;
-    steerConfig.Slot0.kP = 2.0;
+    // Invert the steer motor (Standard for SDS Inverted modules)
+    steerConfig.MotorOutput.Inverted = InvertedValue.CounterClockwise_Positive;
+    steerConfig.Slot0.kP = 10.0;
     steerConfig.Slot0.kI = 0.0;
     steerConfig.Slot0.kD = 0.0;
     steerConfig.CurrentLimits.SupplyCurrentLimit = 40.0;
     steerConfig.CurrentLimits.SupplyCurrentLimitEnable = true;
     steerConfig.ClosedLoopGeneral.ContinuousWrap = true;
-    steerConfig.Feedback.SensorToMechanismRatio = Constants.Swerve.kSteerGearRatio;
+
+    // Use CANcoder as Remote Sensor
+    steerConfig.Feedback.FeedbackRemoteSensorID = cancoder.getDeviceID();
+    steerConfig.Feedback.FeedbackSensorSource = FeedbackSensorSourceValue.RemoteCANcoder;
+    steerConfig.Feedback.SensorToMechanismRatio = 1.0;
+    steerConfig.Feedback.RotorToSensorRatio = Constants.Swerve.kSteerGearRatio;
 
     // Magnet Offset
     var cancoderConfig = new com.ctre.phoenix6.configs.CANcoderConfiguration();
     cancoderConfig.MagnetSensor.MagnetOffset = cancoderOffset;
+    cancoderConfig.MagnetSensor.SensorDirection =
+        com.ctre.phoenix6.signals.SensorDirectionValue.CounterClockwise_Positive;
     cancoder.getConfigurator().apply(cancoderConfig);
 
     driveMotor.getConfigurator().apply(driveConfig);
     steerMotor.getConfigurator().apply(steerConfig);
-
-    // Seed Steer Motor with CANCoder absolute position
-    // Wait for a valid signal to ensure we don't seed 0.0 by accident
-    var posSignal = cancoder.getAbsolutePosition();
-    posSignal.waitForUpdate(0.1);
-    steerMotor.setPosition(posSignal.getValueAsDouble());
   }
 }
