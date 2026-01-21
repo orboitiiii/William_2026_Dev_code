@@ -11,25 +11,32 @@ import frc.robot.framework.SubsystemManager;
 import frc.robot.libraries.lib9427.OdometryCharacterizer;
 import frc.robot.subsystems.Superstructure;
 import frc.robot.subsystems.drive.Drive;
+import frc.robot.subsystems.indexer.Indexer;
 import frc.robot.subsystems.intake.IntakePivot;
 import frc.robot.subsystems.intake.IntakeWheel;
 
 /**
  * Main Robot class extending WPILib's TimedRobot framework.
  *
- * <p>This class serves as the entry point for all robot operations. It implements a Team 254-style
+ * <p>
+ * This class serves as the entry point for all robot operations. It implements
+ * a Team 254-style
  * architecture with the following key components:
  *
  * <ul>
- *   <li><strong>Looper</strong>: High-frequency (100Hz) control loop executor using WPILib's
- *       Notifier for deterministic timing.
- *   <li><strong>SubsystemManager</strong>: Orchestrates lifecycle calls (readInputs, writeOutputs,
- *       telemetry) across all subsystems.
- *   <li><strong>AutoModeExecutor</strong>: Manages autonomous routines in a separate thread to
- *       avoid blocking the main loop.
+ * <li><strong>Looper</strong>: High-frequency (100Hz) control loop executor
+ * using WPILib's
+ * Notifier for deterministic timing.
+ * <li><strong>SubsystemManager</strong>: Orchestrates lifecycle calls
+ * (readInputs, writeOutputs,
+ * telemetry) across all subsystems.
+ * <li><strong>AutoModeExecutor</strong>: Manages autonomous routines in a
+ * separate thread to
+ * avoid blocking the main loop.
  * </ul>
  *
- * <p><strong>Lifecycle Order</strong>:
+ * <p>
+ * <strong>Lifecycle Order</strong>:
  *
  * <pre>
  * robotInit() -> [Mode]Init() -> robotPeriodic() + [Mode]Periodic() -> disabledInit()
@@ -47,6 +54,7 @@ public class Robot extends TimedRobot {
   private final Superstructure mSuperstructure = Superstructure.getInstance();
   private final IntakeWheel mIntakeWheel = IntakeWheel.getInstance();
   private final IntakePivot mIntakePivot = IntakePivot.getInstance();
+  private final Indexer mIndexer = Indexer.getInstance();
 
   private final DashboardState mDashboard = DashboardState.getInstance();
 
@@ -58,7 +66,9 @@ public class Robot extends TimedRobot {
   /**
    * Flag indicating Test Mode is active.
    *
-   * <p>When true, prevents {@link #robotPeriodic()} from calling writePeriodicOutputs, allowing
+   * <p>
+   * When true, prevents {@link #robotPeriodic()} from calling
+   * writePeriodicOutputs, allowing
    * direct motor control for calibration without state machine interference.
    */
   private boolean mIsInTestMode = false;
@@ -66,11 +76,13 @@ public class Robot extends TimedRobot {
   /**
    * Constructs the Robot and registers all subsystems with the framework.
    *
-   * <p>This is called once when the robot code is first loaded. All subsystem instances should be
+   * <p>
+   * This is called once when the robot code is first loaded. All subsystem
+   * instances should be
    * acquired here to ensure consistent initialization order.
    */
   public Robot() {
-    mSubsystemManager.setSubsystems(mDrive, mSuperstructure, mIntakeWheel, mIntakePivot);
+    mSubsystemManager.setSubsystems(mDrive, mSuperstructure, mIntakeWheel, mIntakePivot, mIndexer);
     mSubsystemManager.registerEnabledLoops(mEnabledLooper);
     mEnabledLooper.register(mSubsystemManager);
   }
@@ -78,7 +90,9 @@ public class Robot extends TimedRobot {
   /**
    * Called once when robot code first starts.
    *
-   * <p>Performs JIT warmup to prevent first-loop latency spikes and zeros all subsystem sensors to
+   * <p>
+   * Performs JIT warmup to prevent first-loop latency spikes and zeros all
+   * subsystem sensors to
    * establish a known initial state.
    */
   @Override
@@ -96,13 +110,14 @@ public class Robot extends TimedRobot {
   /**
    * Called every 20ms regardless of robot mode.
    *
-   * <p>Handles:
+   * <p>
+   * Handles:
    *
    * <ul>
-   *   <li>Sensor reading (always)
-   *   <li>Telemetry output (always)
-   *   <li>Actuator output (disabled in Test Mode)
-   *   <li>Dashboard state publication
+   * <li>Sensor reading (always)
+   * <li>Telemetry output (always)
+   * <li>Actuator output (disabled in Test Mode)
+   * <li>Dashboard state publication
    * </ul>
    */
   @Override
@@ -152,7 +167,8 @@ public class Robot extends TimedRobot {
   /**
    * Called once when Teleop mode is enabled.
    *
-   * <p>Starts the enabled looper and stops the disabled looper.
+   * <p>
+   * Starts the enabled looper and stops the disabled looper.
    */
   @Override
   public void teleopInit() {
@@ -164,7 +180,8 @@ public class Robot extends TimedRobot {
   /**
    * Called every 20ms during Teleop mode.
    *
-   * <p>Processes operator inputs and forwards them to the Drive subsystem.
+   * <p>
+   * Processes operator inputs and forwards them to the Drive subsystem.
    */
   @Override
   public void teleopPeriodic() {
@@ -188,12 +205,17 @@ public class Robot extends TimedRobot {
       // Neither button pressed - hold current position (closed-loop)
       mIntakePivot.setOpenLoopVoltage(0);
     }
+
+    // Indexer: Square button held = run both rollers
+    mIndexer.setRunning(control.getIndexerButton());
   }
 
   /**
    * Called once when Autonomous mode is enabled.
    *
-   * <p>Starts the looper infrastructure and launches the autonomous routine in a separate thread
+   * <p>
+   * Starts the looper infrastructure and launches the autonomous routine in a
+   * separate thread
    * via {@link AutoModeExecutor}.
    */
   @Override
@@ -208,14 +230,19 @@ public class Robot extends TimedRobot {
     System.out.println("[Robot] Autonomous mode started");
   }
 
-  /** Called every 20ms during Autonomous mode. Currently no-op; logic runs in Looper. */
+  /**
+   * Called every 20ms during Autonomous mode. Currently no-op; logic runs in
+   * Looper.
+   */
   @Override
-  public void autonomousPeriodic() {}
+  public void autonomousPeriodic() {
+  }
 
   /**
    * Called once when the robot is disabled.
    *
-   * <p>Stops all loopers and the autonomous executor to ensure safe shutdown.
+   * <p>
+   * Stops all loopers and the autonomous executor to ensure safe shutdown.
    */
   @Override
   public void disabledInit() {
@@ -229,16 +256,21 @@ public class Robot extends TimedRobot {
 
   /** Called every 20ms while disabled. Currently no-op. */
   @Override
-  public void disabledPeriodic() {}
+  public void disabledPeriodic() {
+  }
 
   // --- Test Mode (Swerve Calibration & Diagnostics) ---
 
   /**
    * Called once when Test mode is enabled.
    *
-   * <p><strong>Design Rationale</strong>: Test Mode bypasses the normal Looper infrastructure to
-   * allow direct hardware access for calibration. The enabled looper would otherwise trigger
-   * Drive's state machine, causing unintended wheel movement during offset measurement.
+   * <p>
+   * <strong>Design Rationale</strong>: Test Mode bypasses the normal Looper
+   * infrastructure to
+   * allow direct hardware access for calibration. The enabled looper would
+   * otherwise trigger
+   * Drive's state machine, causing unintended wheel movement during offset
+   * measurement.
    */
   @Override
   public void testInit() {
@@ -263,16 +295,18 @@ public class Robot extends TimedRobot {
   /**
    * Called every 20ms during Test mode.
    *
-   * <p>Provides diagnostic tools for Swerve PID tuning:
+   * <p>
+   * Provides diagnostic tools for Swerve PID tuning:
    *
    * <ul>
-   *   <li><strong>A Button</strong>: Calibrate swerve module offsets
-   *   <li><strong>Left Stick</strong>: Control robot translation (diagnostic mode)
-   *   <li><strong>Right Stick X</strong>: Control robot rotation (diagnostic mode)
-   *   <li><strong>Y Button</strong>: Spin all drive motors at 5% (legacy test)
+   * <li><strong>A Button</strong>: Calibrate swerve module offsets
+   * <li><strong>Left Stick</strong>: Control robot translation (diagnostic mode)
+   * <li><strong>Right Stick X</strong>: Control robot rotation (diagnostic mode)
+   * <li><strong>Y Button</strong>: Spin all drive motors at 5% (legacy test)
    * </ul>
    *
-   * <p>SmartDashboard publishes under "Swerve/[FL|FR|BL|BR]/" with: SteerError_deg,
+   * <p>
+   * SmartDashboard publishes under "Swerve/[FL|FR|BL|BR]/" with: SteerError_deg,
    * VelocityError_mps, ActualVelocity_mps, SetpointVelocity_mps
    */
   @Override
@@ -335,7 +369,8 @@ public class Robot extends TimedRobot {
   /**
    * Called once when exiting Test mode.
    *
-   * <p>Resets the Test Mode flag to restore normal operation.
+   * <p>
+   * Resets the Test Mode flag to restore normal operation.
    */
   @Override
   public void testExit() {
