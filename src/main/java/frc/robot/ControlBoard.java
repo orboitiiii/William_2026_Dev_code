@@ -7,26 +7,23 @@ import edu.wpi.first.wpilibj.PS5Controller;
 /**
  * Operator control interface for the robot.
  *
- * <p>
- * This singleton encapsulates all driver input processing, including:
+ * <p>This singleton encapsulates all driver input processing, including:
  *
  * <ul>
- * <li>Joystick deadband and response curve application
- * <li>Coordinate frame transformation (controller → robot)
- * <li>Button debouncing for discrete actions
+ *   <li>Joystick deadband and response curve application
+ *   <li>Coordinate frame transformation (controller → robot)
+ *   <li>Button debouncing for discrete actions
  * </ul>
  *
- * <p>
- * <strong>Controller Mapping</strong>: Xbox/PS5 controller on USB port 0.
+ * <p><strong>Controller Mapping</strong>: Xbox/PS5 controller on USB port 0.
  *
- * <p>
- * <strong>Coordinate Convention</strong>:
+ * <p><strong>Coordinate Convention</strong>:
  *
  * <ul>
- * <li>Left Stick Y (forward) → Robot +X (forward)
- * <li>Left Stick X (right) → Robot -Y (left is positive in FRC)
- * <li>L2 Trigger (Unpressed → Pressed) → Robot +ω (Turn Left / CCW)
- * <li>R2 Trigger (Unpressed → Pressed) → Robot -ω (Turn Right / CW)
+ *   <li>Left Stick Y (forward) → Robot +X (forward)
+ *   <li>Left Stick X (right) → Robot -Y (left is positive in FRC)
+ *   <li>L2 Trigger (Unpressed → Pressed) → Robot +ω (Turn Left / CCW)
+ *   <li>R2 Trigger (Unpressed → Pressed) → Robot -ω (Turn Right / CW)
  * </ul>
  */
 public class ControlBoard {
@@ -56,12 +53,9 @@ public class ControlBoard {
   /**
    * Returns the desired translation vector from the left joystick.
    *
-   * <p>
-   * Applies deadband and square response curve for fine control at low speeds.
+   * <p>Applies deadband and square response curve for fine control at low speeds.
    *
-   * <p>
-   * <strong>Output Range</strong>: [-1, 1] for both X and Y components. Scale by
-   * max velocity in
+   * <p><strong>Output Range</strong>: [-1, 1] for both X and Y components. Scale by max velocity in
    * the caller.
    *
    * @return Translation2d with X = forward, Y = strafe left.
@@ -85,11 +79,9 @@ public class ControlBoard {
   /**
    * Returns the desired rotation rate from the right joystick.
    *
-   * <p>
-   * Applies deadband and square response curve.
+   * <p>Applies deadband and square response curve.
    *
-   * <p>
-   * <strong>Output Range</strong>: [-1, 1]. Positive = CCW rotation.
+   * <p><strong>Output Range</strong>: [-1, 1]. Positive = CCW rotation.
    *
    * @return Normalized rotation command.
    */
@@ -127,8 +119,7 @@ public class ControlBoard {
   /**
    * Returns true when the gyro zero button is pressed.
    *
-   * <p>
-   * Uses A button. Resets the robot's heading to zero.
+   * <p>Uses A button. Resets the robot's heading to zero.
    *
    * @return True if gyro reset is requested.
    */
@@ -141,9 +132,7 @@ public class ControlBoard {
   /**
    * Returns true on the rising edge of the calibrate button press.
    *
-   * <p>
-   * Used in Test Mode to trigger swerve module zero-point calibration. In Test
-   * Mode, the A
+   * <p>Used in Test Mode to trigger swerve module zero-point calibration. In Test Mode, the A
    * button semantics change from "Zero Gyro" to "Calibrate Swerve".
    *
    * @return True on button press (edge-detected to prevent repeated triggers).
@@ -155,9 +144,7 @@ public class ControlBoard {
   /**
    * Returns true while the drive motor test button is held.
    *
-   * <p>
-   * Used in Test Mode to run all drive motors at a fixed duty cycle for
-   * diagnostic purposes
+   * <p>Used in Test Mode to run all drive motors at a fixed duty cycle for diagnostic purposes
    * (verifying motor direction, encoder feedback, etc.).
    *
    * @return True while Y button is held.
@@ -171,9 +158,7 @@ public class ControlBoard {
   /**
    * Returns true on the rising edge of R1 button press.
    *
-   * <p>
-   * Used to toggle Intake operation. Edge-detected to prevent repeated triggers
-   * while button is
+   * <p>Used to toggle Intake operation. Edge-detected to prevent repeated triggers while button is
    * held.
    *
    * @return True on R1 button press (rising edge only).
@@ -187,9 +172,7 @@ public class ControlBoard {
   /**
    * Returns true while R1 button is held.
    *
-   * <p>
-   * Used for Intake Pivot forward (positive) rotation. The pivot rotates forward
-   * as long as the
+   * <p>Used for Intake Pivot forward (positive) rotation. The pivot rotates forward as long as the
    * button is held.
    *
    * @return True while R1 is held.
@@ -201,9 +184,7 @@ public class ControlBoard {
   /**
    * Returns true while L1 button is held.
    *
-   * <p>
-   * Used for Intake Pivot reverse (negative) rotation. The pivot rotates backward
-   * as long as the
+   * <p>Used for Intake Pivot reverse (negative) rotation. The pivot rotates backward as long as the
    * button is held.
    *
    * @return True while L1 is held.
@@ -217,15 +198,26 @@ public class ControlBoard {
   /**
    * Returns true while the Square button is held.
    *
-   * <p>
-   * Used to run the Indexer. Both Side Roller and Straight Roller will spin while
-   * the button is
+   * <p>Used to run the Indexer. Both Side Roller and Straight Roller will spin while the button is
    * pressed.
    *
    * @return True while Square button is held.
    */
   public boolean getIndexerButton() {
     return mController.getSquareButton();
+  }
+
+  // --- Shooter Controls ---
+
+  /**
+   * Returns true while the Cross button is held.
+   *
+   * <p>Used to run the Shooter. Both flywheels will spin while the button is pressed.
+   *
+   * @return True while Cross button is held.
+   */
+  public boolean getShooterButton() {
+    return mController.getCrossButton();
   }
 
   // --- Odometry Characterizer Controls (Test Mode) ---
@@ -236,14 +228,10 @@ public class ControlBoard {
   /**
    * Returns true on the rising edge of Square button press.
    *
-   * <p>
-   * Used in Test Mode to start/stop odometry recording.
+   * <p>Used in Test Mode to start/stop odometry recording.
    *
-   * <p>
-   * <strong>Note</strong>: This method conflicts with {@link #getIndexerButton()}
-   * in normal
-   * operation. It should only be used in Test Mode where Indexer control is
-   * disabled.
+   * <p><strong>Note</strong>: This method conflicts with {@link #getIndexerButton()} in normal
+   * operation. It should only be used in Test Mode where Indexer control is disabled.
    *
    * @return True on button press (edge-detected).
    */
@@ -257,8 +245,7 @@ public class ControlBoard {
   /**
    * Returns true on the rising edge of Circle button press.
    *
-   * <p>
-   * Used in Test Mode to end the current trial and reset odometry.
+   * <p>Used in Test Mode to end the current trial and reset odometry.
    *
    * @return True on button press (edge-detected).
    */
@@ -269,12 +256,57 @@ public class ControlBoard {
   /**
    * Returns true on the rising edge of Options button press.
    *
-   * <p>
-   * Used in Test Mode to export all trial data to CSV.
+   * <p>Used in Test Mode to export all trial data to CSV.
    *
    * @return True on button press (edge-detected).
    */
   public boolean getExportButton() {
     return mController.getOptionsButtonPressed();
+  }
+
+  // --- SysId Controls (Test Mode) ---
+
+  /**
+   * Returns true while Triangle button is held.
+   *
+   * <p>Used in Test Mode for Quasistatic Forward SysId test.
+   *
+   * @return True while Triangle is held.
+   */
+  public boolean getSysIdQuasistaticForward() {
+    return mController.getTriangleButton();
+  }
+
+  /**
+   * Returns true while Circle button is held.
+   *
+   * <p>Used in Test Mode for Quasistatic Reverse SysId test.
+   *
+   * @return True while Circle is held.
+   */
+  public boolean getSysIdQuasistaticReverse() {
+    return mController.getCircleButton();
+  }
+
+  /**
+   * Returns true while Square button is held.
+   *
+   * <p>Used in Test Mode for Dynamic Forward SysId test.
+   *
+   * @return True while Square is held.
+   */
+  public boolean getSysIdDynamicForward() {
+    return mController.getSquareButton();
+  }
+
+  /**
+   * Returns true while Cross button is held.
+   *
+   * <p>Used in Test Mode for Dynamic Reverse SysId test.
+   *
+   * @return True while Cross is held.
+   */
+  public boolean getSysIdDynamicReverse() {
+    return mController.getCrossButton();
   }
 }

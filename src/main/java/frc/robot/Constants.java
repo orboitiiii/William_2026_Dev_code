@@ -736,15 +736,11 @@ public final class Constants {
     public static final boolean kStraightRollerInverted = true;
 
     // --- Voltage Control ---
-    /**
-     * Voltage output for indexer operation.
-     *
-     * <p>
-     * Using voltage control instead of duty cycle ensures consistent motor output
-     * regardless of
-     * battery voltage fluctuations.
-     */
-    public static final double kIndexerVoltage = 3.0;
+    /** Voltage output for Side Roller operation. */
+    public static final double kSideRollerVoltage = 3.0;
+
+    /** Voltage output for Straight Roller operation. */
+    public static final double kStraightRollerVoltage = 5.0;
 
     // --- Current Limits ---
     /**
@@ -755,6 +751,112 @@ public final class Constants {
 
     /** Enable supply current limiting. */
     public static final boolean kSupplyCurrentLimitEnable = true;
+  }
+
+  /**
+   * Constants for the Shooter subsystem.
+   *
+   * <p>
+   * Defines motor configuration and control parameters for the dual-motor shooter
+   * mechanism.
+   *
+   * <p>
+   * <strong>Motor Configuration</strong>:
+   *
+   * <ul>
+   * <li>Right Motor: Leader, Clockwise Positive (inverted).
+   * <li>Left Motor: Follower, Opposed alignment for mirrored counter-rotation.
+   * </ul>
+   *
+   * <p>
+   * <strong>First Principles</strong>: In a dual-flywheel shooter, both flywheels
+   * spin inward
+   * toward the game piece. Since the motors face each other (mirrored mounting),
+   * the Opposed
+   * follower mode inverts the follower voltage, achieving synchronized inward
+   * rotation.
+   */
+  public static final class Shooter {
+    // --- CAN IDs ---
+    /** CAN ID for the right (leader) shooter motor (KrakenX60). */
+    public static final int kRightMotorId = 50;
+
+    /** CAN ID for the left (follower) shooter motor (KrakenX60). */
+    public static final int kLeftMotorId = 51;
+
+    // --- Voltage Control ---
+    /**
+     * Voltage output for shooter operation.
+     *
+     * <p>
+     * Using voltage control instead of duty cycle ensures consistent motor output
+     * regardless of
+     * battery voltage fluctuations.
+     */
+    public static final double kShooterVoltage = -10.0;
+
+    // --- SysId Parameters (from characterization) ---
+    // Date: 2026-01-23
+    // Source: OLS regression on Quasistatic/Dynamic test data
+
+    /**
+     * Static friction voltage (kS).
+     *
+     * <p>
+     * Minimum voltage required to overcome static friction and initiate motion.
+     */
+    public static final double kS = 0.1761;
+
+    /**
+     * Velocity gain (kV).
+     *
+     * <p>
+     * Units: Volts / (rotations per second). Represents the voltage required to
+     * maintain a given
+     * velocity at steady state.
+     */
+    public static final double kV = 0.1136;
+
+    /**
+     * Acceleration gain (kA).
+     *
+     * <p>
+     * Units: Volts / (rotations per second squared). Represents the voltage
+     * required to produce
+     * a given acceleration.
+     */
+    public static final double kA = 0.0103;
+
+    /**
+     * Target velocity for closed-loop speed control.
+     *
+     * <p>
+     * Derived from steady-state velocity at 4V during Dynamic test. Used for Cross
+     * button
+     * velocity mode.
+     */
+    public static final double kTargetVelocity = -60.0; // rot/s
+
+    /**
+     * Proportional gain for velocity control.
+     *
+     * <p>
+     * Units: Volts / (rotations per second error). Provides feedback correction.
+     */
+    public static final double kP = 0.05;
+
+    // --- Current Limits ---
+    /** Supply current limit in Amps per motor. Prevents brownouts. */
+    public static final double kSupplyCurrentLimit = 40.0;
+
+    /** Enable supply current limiting. */
+    public static final boolean kSupplyCurrentLimitEnable = true;
+
+    /** Stator current limit in Amps per motor. Limits motor torque output. */
+    public static final double kStatorCurrentLimit = 80.0;
+
+    /** Enable stator current limiting. */
+    public static final boolean kStatorCurrentLimitEnable = true;
   }
 
   /** Autonomous trajectory following parameters. */
