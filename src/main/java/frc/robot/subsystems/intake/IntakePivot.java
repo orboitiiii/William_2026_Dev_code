@@ -1,9 +1,17 @@
 package frc.robot.subsystems.intake;
 
+import static edu.wpi.first.units.Units.Seconds;
+import static edu.wpi.first.units.Units.Volts;
+
 import edu.wpi.first.math.geometry.Rotation2d;
+import edu.wpi.first.math.interpolation.InterpolatingDoubleTreeMap;
+import edu.wpi.first.wpilibj.Timer;
+import frc.robot.Constants;
+import frc.robot.framework.CSVLogWriter;
 import frc.robot.framework.ILoop;
 import frc.robot.framework.Looper;
 import frc.robot.framework.Subsystem;
+import frc.robot.framework.SysIdRoutine;
 
 /**
  * Intake Pivot Subsystem - Dual-motor Four-Bar Linkage mechanism.
@@ -31,11 +39,6 @@ import frc.robot.framework.Subsystem;
 public class IntakePivot extends Subsystem {
   private static IntakePivot mInstance;
 
-  /**
-   * Returns the singleton instance.
-   *
-   * @return The global IntakePivot instance.
-   */
   public static IntakePivot getInstance() {
     if (mInstance == null) {
       mInstance = new IntakePivot();
@@ -43,21 +46,45 @@ public class IntakePivot extends Subsystem {
     return mInstance;
   }
 
+  public enum PivotState {
+    STOWED,
+    INTAKE,
+    SCORE_FUEL,
+    MANUAL
+  }
+
   private final IntakePivotIO mIO;
   private final IntakePivotIO.IntakePivotIOInputs mInputs = new IntakePivotIO.IntakePivotIOInputs();
 
-  /** Desired pivot target angle. */
+  // --- SysId Integration ---
+  private final SysIdRoutine mSysIdRoutine;
+  private boolean mSysIdActive = false;
+
+  private PivotState mState = PivotState.STOWED;
   private Rotation2d mTargetAngle = new Rotation2d();
-
-  /** Control mode flag: true = position control, false = open-loop voltage. */
   private boolean mIsClosedLoop = true;
-
-  /** Open-loop voltage command (only used when mIsClosedLoop = false). */
   private double mOpenLoopVoltage = 0.0;
 
+  // Gravity Compensation Map (Angle -> kG)
+  private final InterpolatingDoubleTreeMap mGravityMap = new InterpolatingDoubleTreeMap();
+
   private IntakePivot() {
-    // Use real IO implementation; swap to simulation IO if needed
     mIO = new IntakePivotIOReal();
+
+    // Populate Gravity Map
+    for (double[] point : Constants.IntakePivot.kGravityMap) {
+      mGravityMap.put(point[0], point[1]);
+    }
+
+    // Initialize SysId routine with IntakePivot-specific configuration
+    mSysIdRoutine =
+        new SysIdRoutine(
+            new SysIdRoutine.Config()
+                .setSubsystemName("IntakePivot")
+                .setRampRate(Volts.of(1.0)) // 1 V/s for quasistatic
+                .setStepVoltage(Volts.of(3.0)) // 3V step for dynamic
+                .setTimeout(Seconds.of(10.0)) // 10s safety timeout
+                .setLogWriter(new CSVLogWriter("sysid_IntakePivot")));
   }
 
   @Override
@@ -67,15 +94,35 @@ public class IntakePivot extends Subsystem {
           @Override
           public void onStart(double timestamp) {
             synchronized (IntakePivot.this) {
-              // Hold current position at enable
               mTargetAngle = mInputs.position;
-              mIsClosedLoop = true;
+              mState = PivotState.STOWED;
+              // Only enable closed-loop control if NOT in Test Mode
+              if (!frc.robot.GlobalData.isTestMode) {
+                mIsClosedLoop = true;
+              } else {
+                mIsClosedLoop = false;
+              }
             }
           }
 
           @Override
           public void onLoop(double timestamp) {
-            // State machine logic runs here if needed
+            synchronized (IntakePivot.this) {
+              switch (mState) {
+                case STOWED:
+                  mTargetAngle = Rotation2d.fromDegrees(80.0);
+                  break;
+                case INTAKE:
+                  mTargetAngle = Rotation2d.fromDegrees(Constants.IntakePivot.kMinAngle);
+                  break;
+                case SCORE_FUEL:
+                  mTargetAngle = Rotation2d.fromDegrees(Constants.IntakePivot.kMinAngle);
+                  break;
+                case MANUAL:
+                  // Target angle set externally
+                  break;
+              }
+            }
           }
 
           @Override
@@ -85,75 +132,177 @@ public class IntakePivot extends Subsystem {
         });
   }
 
-  // --- Public API ---
+  // --- SysId API (Test Mode Only) ---
 
   /**
-   * Commands the pivot to a target angle using closed-loop position control.
+   * Starts a SysId characterization test.
    *
-   * <p>Uses MotionMagic for smooth, trapezoid velocity profiled motion.
-   *
-   * @param angle Target pivot angle.
+   * @param type Test type (QUASISTATIC or DYNAMIC).
+   * @param direction Test direction (FORWARD or REVERSE).
    */
-  public synchronized void setTargetAngle(Rotation2d angle) {
-    mTargetAngle = angle;
+  public void startSysId(SysIdRoutine.TestType type, SysIdRoutine.Direction direction) {
+    mSysIdActive = true;
+    mIsClosedLoop = false;
+    mSysIdRoutine.start(type, direction);
+  }
+
+  /** Stops the active SysId test and saves data to CSV. */
+  public void stopSysId() {
+    if (mSysIdActive) {
+      mSysIdRoutine.stop();
+      mSysIdActive = false;
+      mIO.setVoltage(0);
+    }
+  }
+
+  /** Updates the SysId routine and applies the calculated voltage. */
+  public void updateSysId() {
+    if (mSysIdActive) {
+      double timestamp = Timer.getFPGATimestamp();
+      Rotation2d pos = getAngle();
+      double velRotPerSec = mInputs.velocityRotationsPerSec; // Already in Rot/s
+      mSysIdRoutine.update(timestamp, pos.getRotations(), velRotPerSec);
+      mOpenLoopVoltage = mSysIdRoutine.getOutputVoltage();
+      mIsClosedLoop = false; // Ensure we stay in open loop
+    }
+  }
+
+  /** Checks if a SysId test is currently running. */
+  public boolean isSysIdActive() {
+    return mSysIdActive;
+  }
+
+  // ============================================================
+  // PER-STATE OPERATE METHODS (Orbit 1690 Pattern Decoupled)
+  // ============================================================
+  // The IntakePivot state is now independently controlled via GlobalData toggles.
+
+  private void processWantedState() {
+    if (frc.robot.GlobalData.pivotWantsDown) {
+      mState = PivotState.INTAKE;
+    } else {
+      mState = PivotState.STOWED;
+    }
     mIsClosedLoop = true;
   }
 
-  /**
-   * Commands the pivot with open-loop voltage control.
-   *
-   * <p>Useful for manual jogging or calibration. Positive voltage moves the pivot in the positive
-   * direction (as defined by the right motor convention).
-   *
-   * @param volts Voltage command (-12 to +12).
-   */
+  @Override
+  public void travelOperate() {
+    processWantedState();
+  }
+
+  @Override
+  public void intakeOperate() {
+    processWantedState();
+  }
+
+  @Override
+  public void scoreOperate() {
+    processWantedState();
+  }
+
+  @Override
+  public void passOperate() {
+    processWantedState();
+  }
+
+  @Override
+  public void climbOperate() {
+    processWantedState();
+  }
+
+  @Override
+  public void calibrateOperate() {
+    mState = PivotState.STOWED;
+    mIsClosedLoop = true;
+  }
+
+  // ============================================================
+  // TEST MODE (Distributed Pattern)
+  // ============================================================
+
+  /** Test routine selector for IntakePivot. */
+  public enum PivotTestRoutine {
+    VOLTAGE,
+    SYSID,
+    CONTROL_LOOP
+  }
+
+  private PivotTestRoutine mTestRoutine = PivotTestRoutine.CONTROL_LOOP;
+  private boolean mPivotSysIdButtonWasPressed = false;
+
+  @Override
+  public void handleTestMode(frc.robot.ControlBoard control) {
+    switch (mTestRoutine) {
+      case VOLTAGE -> {
+        boolean fwd = control.getPivotForward();
+        boolean rev = control.getPivotReverse();
+        if (fwd) {
+          setOpenLoopVoltage(1.0);
+        } else if (rev) {
+          setOpenLoopVoltage(-1.0);
+        } else {
+          setOpenLoopVoltage(0.0);
+        }
+      }
+      case SYSID -> {
+        boolean anySysIdButtonPressed =
+            control.getTriangleButton() || control.getSquareButton() || control.getCrossButton();
+        boolean circlePressed = control.getCircleButton();
+        if (!isSysIdActive()) {
+          setOpenLoopVoltage(0.0);
+          if (control.getTriangleButton()) {
+            startSysId(SysIdRoutine.TestType.QUASISTATIC, SysIdRoutine.Direction.FORWARD);
+          } else if (control.getSquareButton()) {
+            startSysId(SysIdRoutine.TestType.QUASISTATIC, SysIdRoutine.Direction.REVERSE);
+          } else if (control.getCrossButton()) {
+            startSysId(SysIdRoutine.TestType.DYNAMIC, SysIdRoutine.Direction.FORWARD);
+          } else if (circlePressed) {
+            startSysId(SysIdRoutine.TestType.DYNAMIC, SysIdRoutine.Direction.REVERSE);
+          }
+        }
+        updateSysId();
+        if (mPivotSysIdButtonWasPressed && !anySysIdButtonPressed && !circlePressed) {
+          stopSysId();
+        }
+        mPivotSysIdButtonWasPressed = anySysIdButtonPressed || circlePressed;
+      }
+      case CONTROL_LOOP -> {
+        if (control.getPivotForward()) {
+          runTestPosition(edu.wpi.first.math.geometry.Rotation2d.fromDegrees(90));
+        } else if (control.getPivotReverse()) {
+          runTestPosition(edu.wpi.first.math.geometry.Rotation2d.fromDegrees(23));
+        } else {
+          setOpenLoopVoltage(0.0);
+        }
+      }
+    }
+  }
+
+  public synchronized void setWantedState(PivotState state) {
+    mState = state;
+    mIsClosedLoop = true;
+  }
+
   public synchronized void setOpenLoopVoltage(double volts) {
     mOpenLoopVoltage = volts;
     mIsClosedLoop = false;
   }
 
-  /**
-   * Returns the current pivot angle.
-   *
-   * @return Current pivot position as Rotation2d.
-   */
+  public synchronized void runTestPosition(Rotation2d target) {
+    mState = PivotState.MANUAL;
+    mTargetAngle = target;
+    mIsClosedLoop = true;
+  }
+
   public synchronized Rotation2d getAngle() {
     return mInputs.position;
   }
 
-  /**
-   * Returns the target pivot angle.
-   *
-   * @return Target angle as Rotation2d.
-   */
-  public synchronized Rotation2d getTargetAngle() {
-    return mTargetAngle;
-  }
-
-  /**
-   * Checks if the pivot is at the target position within tolerance.
-   *
-   * @param toleranceDegrees Allowable error in degrees.
-   * @return True if within tolerance.
-   */
   public synchronized boolean atTarget(double toleranceDegrees) {
     double errorDegrees = Math.abs(mTargetAngle.minus(mInputs.position).getDegrees());
     return errorDegrees <= toleranceDegrees;
   }
-
-  /**
-   * Resets the motor encoder positions to the specified angle.
-   *
-   * <p>Used for calibration when the physical position is known (e.g., at a hard stop).
-   *
-   * @param angle The current physical angle to set as the encoder reference.
-   */
-  public synchronized void resetPosition(Rotation2d angle) {
-    mIO.resetPosition(angle);
-    mTargetAngle = angle;
-  }
-
-  // --- Subsystem Interface ---
 
   @Override
   public void readPeriodicInputs() {
@@ -163,66 +312,104 @@ public class IntakePivot extends Subsystem {
   @Override
   public void writePeriodicOutputs() {
     synchronized (this) {
-      if (mIsClosedLoop) {
-        mIO.setPosition(mTargetAngle);
-      } else {
-        mIO.setVoltage(mOpenLoopVoltage);
+      synchronized (this) {
+        if (mIsClosedLoop) {
+          // Asymmetric Motion Magic Logic
+          // Determine direction: Target > Current = UP (Positive Angle)
+          // Note: Angles are Down=Positive? No, "Down = Positive Angle" in IO config.
+          // Let's check Constants.
+          // If Down is Positive, then:
+          // Target > Current = Moving Down (Slower)
+          // Target < Current = Moving Up (Faster)
+
+          // Let's verify:
+          // stow = 90 (vertical down?)
+          // intake = 27 (angled up?)
+          // so 90 -> 27 is UP. (Large to Small is UP)
+          // 27 -> 90 is DOWN. (Small to Large is DOWN)
+
+          double currentDeg = mInputs.position.getDegrees();
+          double targetDeg = mTargetAngle.getDegrees();
+
+          double cruiseVel;
+          double accel;
+
+          if (targetDeg > currentDeg) {
+            // Moving to larger angle -> UP (e.g. 27 to 90) -> Fast
+            cruiseVel = Constants.IntakePivot.kCruiseVelocityUp;
+            accel = Constants.IntakePivot.kAccelerationUp;
+          } else {
+            // Moving to smaller angle -> DOWN (e.g. 90 to 27) -> Slow
+            cruiseVel = Constants.IntakePivot.kCruiseVelocityDown;
+            accel = Constants.IntakePivot.kAccelerationDown;
+          }
+
+          double kG = mGravityMap.get(mInputs.position.getDegrees());
+          double gravityVolts = kG * mInputs.position.getCos();
+
+          // Apply extra downward pressure if we are intaking and deployed
+          boolean applyingDownPressure = false;
+          double downPressureVolts = 0.0;
+
+          if (mState == PivotState.INTAKE && atTarget(5.0)) {
+            if (IntakeWheel.getInstance().isTakingIn()) {
+              applyingDownPressure = true;
+              // Pure voltage hold: overcome gravity + physical down pressure
+              downPressureVolts = gravityVolts - Constants.IntakePivot.kIntakeDownPressureVolts;
+            }
+          }
+
+          if (applyingDownPressure) {
+            // Bypass MotionMagic entirely. Let the motor hold using pure voltage to prevent
+            // PID windup or Trajectory Generator trapping at the physical boundary.
+            mIO.setVoltage(downPressureVolts);
+          } else {
+            // Normal MotionMagic position tracking
+            mIO.setPosition(mTargetAngle, gravityVolts, cruiseVel, accel);
+          }
+        } else {
+          mIO.setVoltage(mOpenLoopVoltage);
+        }
       }
     }
   }
 
   @Override
   public boolean checkConnectionActive() {
-    System.out.println("[IntakePivot] Running Active Connection Check...");
+    int firmwareParams = mIO.getRightMotorFirmwareVersion();
+    boolean rightOK = firmwareParams > 0;
 
-    int rightFw = mIO.getRightMotorFirmwareVersion();
-    int leftFw = mIO.getLeftMotorFirmwareVersion();
+    // Optional: Check left motor too if IO supports it (added method to IO
+    // interface?)
+    // Assuming mIO.getRightMotorFirmwareVersion checks the leader.
 
-    boolean rightOk = rightFw != 0;
-    boolean leftOk = leftFw != 0;
-
-    if (!rightOk) {
-      System.err.println("[IntakePivot] Right Motor Firmware Read Failed!");
-    } else {
-      System.out.println("[IntakePivot] Right Motor FW: " + rightFw);
-    }
-
-    if (!leftOk) {
-      System.err.println("[IntakePivot] Left Motor Firmware Read Failed!");
-    } else {
-      System.out.println("[IntakePivot] Left Motor FW: " + leftFw);
-    }
-
-    return rightOk && leftOk;
+    return rightOK;
   }
 
   @Override
   public boolean checkConnectionPassive() {
-    return mInputs.rightMotorConnected && mInputs.leftMotorConnected;
+    return true;
   }
 
   @Override
   public boolean checkSanityPassive() {
-    // Check for current mismatch (indicates mechanical binding or motor failure)
-    double currentDiff = Math.abs(mInputs.rightCurrentAmps - mInputs.leftCurrentAmps);
-    if (currentDiff > 20.0) {
-      System.err.println(
-          "[IntakePivot] Current Mismatch: R="
-              + mInputs.rightCurrentAmps
-              + "A, L="
-              + mInputs.leftCurrentAmps
-              + "A");
+    // 1. Hard position bounds check
+    // Pivot should never exceed [-5 deg, +110 deg] mapped via Constants
+    double angleDeg = mInputs.position.getDegrees();
+    if (angleDeg < Constants.IntakePivot.kMinAngle - 5.0
+        || angleDeg > Constants.IntakePivot.kMaxAngle + 5.0) {
       return false;
     }
 
-    // Check for excessive current (stall condition)
-    if (mInputs.rightCurrentAmps > 60.0 || mInputs.leftCurrentAmps > 60.0) {
-      System.err.println(
-          "[IntakePivot] Current Spike: R="
-              + mInputs.rightCurrentAmps
-              + "A, L="
-              + mInputs.leftCurrentAmps
-              + "A");
+    // 2. Continuous over-current or massive disparity
+    double currentDiff = Math.abs(mInputs.leftCurrentAmps - mInputs.rightCurrentAmps);
+    if (currentDiff > 25.0 || mInputs.leftCurrentAmps > 80.0 || mInputs.rightCurrentAmps > 80.0) {
+      return false;
+    }
+
+    // 3. Stall check (high voltage, zero/low movement)
+    if (Math.abs(mInputs.rightAppliedVolts) > 6.0
+        && Math.abs(mInputs.velocityRotationsPerSec) < 0.1) {
       return false;
     }
 
@@ -231,16 +418,24 @@ public class IntakePivot extends Subsystem {
 
   @Override
   public void outputTelemetry() {
-    // TODO: Publish pivot state to NetworkTables
-    // SmartDashboard.putNumber("IntakePivot/AngleDeg",
-    // mInputs.position.getDegrees());
-    // SmartDashboard.putNumber("IntakePivot/TargetDeg", mTargetAngle.getDegrees());
+    frc.robot.DashboardState.getInstance().intakePivotOK =
+        checkConnectionPassive() && checkSanityPassive();
+    edu.wpi.first.wpilibj.smartdashboard.SmartDashboard.putNumber(
+        "IntakePivot/Angle", mInputs.position.getDegrees());
+    edu.wpi.first.wpilibj.smartdashboard.SmartDashboard.putNumber(
+        "IntakePivot/AppliedVolts", mInputs.rightAppliedVolts);
+    edu.wpi.first.wpilibj.smartdashboard.SmartDashboard.putNumber(
+        "IntakePivot/TargetAngle", mTargetAngle.getDegrees());
+    double kG = mGravityMap.get(mInputs.position.getDegrees());
+    edu.wpi.first.wpilibj.smartdashboard.SmartDashboard.putNumber(
+        "IntakePivot/FeedForwardVolts", kG * mInputs.position.getCos());
+    edu.wpi.first.wpilibj.smartdashboard.SmartDashboard.putNumber("IntakePivot/kG", kG);
   }
 
   @Override
   public void stop() {
     synchronized (this) {
-      mIsClosedLoop = true;
+      mIsClosedLoop = false;
       mOpenLoopVoltage = 0.0;
     }
     mIO.stop();
@@ -248,9 +443,6 @@ public class IntakePivot extends Subsystem {
 
   @Override
   public void zeroSensors() {
-    mIO.resetPosition(new Rotation2d());
-    synchronized (this) {
-      mTargetAngle = new Rotation2d();
-    }
+    mIO.resetPosition(Rotation2d.fromDegrees(Constants.IntakePivot.kMinAngle));
   }
 }

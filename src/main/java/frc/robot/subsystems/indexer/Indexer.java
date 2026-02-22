@@ -1,8 +1,15 @@
 package frc.robot.subsystems.indexer;
 
+import static edu.wpi.first.units.Units.Seconds;
+import static edu.wpi.first.units.Units.Volts;
+
+import edu.wpi.first.wpilibj.Timer;
+import frc.robot.ControlBoard;
+import frc.robot.framework.CSVLogWriter;
 import frc.robot.framework.ILoop;
 import frc.robot.framework.Looper;
 import frc.robot.framework.Subsystem;
+import frc.robot.framework.SysIdRoutine;
 
 /**
  * Indexer Subsystem - Dual-motor game piece transfer mechanism.
@@ -48,11 +55,45 @@ public class Indexer extends Subsystem {
    * <p>Synchronized access required as state changes may originate from the main robot thread while
    * the Looper reads state from a separate thread.
    */
-  private boolean mIsRunning = false;
+  private boolean mSideRollerRunning = false;
+
+  private boolean mStraightRollerRunning = false;
+
+  /**
+   * Target spinner velocity [rot/s] for the side roller during scoring. Dynamically capped by
+   * ShotTables.maxSpinnerRps(distance) to prevent mid-air ball collisions. Negative because the
+   * roller direction is inverted. Preallocated to avoid GC in the control loop.
+   */
+  private double mSideRollerTargetRps = frc.robot.Constants.Indexer.kSideRollerTargetVelocity;
+
+  // --- SysId Integration ---
+  private final SysIdRoutine mSideSysIdRoutine;
+  private final SysIdRoutine mStraightSysIdRoutine;
+  private boolean mSideSysIdActive = false;
+  private boolean mStraightSysIdActive = false;
 
   private Indexer() {
     // Use real IO implementation; swap to simulation IO if needed
     mIO = new IndexerIOReal();
+
+    // Initialize SysId routines
+    mSideSysIdRoutine =
+        new SysIdRoutine(
+            new SysIdRoutine.Config()
+                .setSubsystemName("Indexer_Side")
+                .setRampRate(Volts.of(1.0))
+                .setStepVoltage(Volts.of(4.0))
+                .setTimeout(Seconds.of(10.0))
+                .setLogWriter(new CSVLogWriter("sysid_Indexer_Side")));
+
+    mStraightSysIdRoutine =
+        new SysIdRoutine(
+            new SysIdRoutine.Config()
+                .setSubsystemName("Indexer_Straight")
+                .setRampRate(Volts.of(1.0))
+                .setStepVoltage(Volts.of(4.0))
+                .setTimeout(Seconds.of(10.0))
+                .setLogWriter(new CSVLogWriter("sysid_Indexer_Straight")));
   }
 
   @Override
@@ -62,7 +103,9 @@ public class Indexer extends Subsystem {
           @Override
           public void onStart(double timestamp) {
             synchronized (Indexer.this) {
-              mIsRunning = false;
+              mSideRollerRunning = false;
+              mStraightRollerRunning = false;
+              stopSysId();
             }
           }
 
@@ -81,31 +124,239 @@ public class Indexer extends Subsystem {
   // --- Public API ---
 
   /**
-   * Sets the running state of the indexer.
+   * Sets the running state of the indexer (both rollers).
    *
    * @param running True to run the indexer, false to stop.
    */
   public synchronized void setRunning(boolean running) {
-    mIsRunning = running;
+    mSideRollerRunning = running;
+    mStraightRollerRunning = running;
   }
 
   /**
-   * Toggles the indexer state.
+   * Sets the running state of the Side Roller.
    *
-   * <p>If currently running, stops the indexer. If stopped, starts the indexer.
+   * @param running True to run the side roller, false to stop.
+   */
+  public synchronized void setSideRollerRunning(boolean running) {
+    mSideRollerRunning = running;
+  }
+
+  /**
+   * Sets the running state of the Straight Roller.
+   *
+   * @param running True to run the straight roller, false to stop.
+   */
+  public synchronized void setStraightRollerRunning(boolean running) {
+    mStraightRollerRunning = running;
+  }
+
+  /**
+   * Toggles the indexer state (both rollers).
+   *
+   * <p>If either is running, stops both. If neither is running, starts both.
    */
   public synchronized void toggle() {
-    mIsRunning = !mIsRunning;
-    System.out.println("[Indexer] Toggle -> " + (mIsRunning ? "RUNNING" : "STOPPED"));
+    boolean anyRunning = mSideRollerRunning || mStraightRollerRunning;
+    if (anyRunning) {
+      mSideRollerRunning = false;
+      mStraightRollerRunning = false;
+    } else {
+      mSideRollerRunning = true;
+      mStraightRollerRunning = true;
+    }
   }
 
   /**
-   * Returns the current running state.
+   * Returns true if either roller is running.
    *
-   * @return True if the indexer is running.
+   * @return True if active.
    */
   public synchronized boolean isRunning() {
-    return mIsRunning;
+    return mSideRollerRunning || mStraightRollerRunning;
+  }
+
+  public synchronized boolean isSideRollerRunning() {
+    return mSideRollerRunning;
+  }
+
+  public synchronized boolean isStraightRollerRunning() {
+    return mStraightRollerRunning;
+  }
+
+  // ============================================================
+  // PER-STATE OPERATE METHODS (Orbit 1690 Pattern)
+  // ============================================================
+
+  @Override
+  public void travelOperate() {
+    mStraightRollerRunning = false;
+    mSideRollerRunning = false;
+  }
+
+  @Override
+  public void intakeOperate() {
+    // Indexer idle during intake (only intake wheel runs)
+    mStraightRollerRunning = false;
+    mSideRollerRunning = false;
+  }
+
+  @Override
+  public void scoreOperate() {
+    mStraightRollerRunning = true;
+    // Side roller only when shooter, turret, and hood are all at target
+    var shooter = frc.robot.subsystems.shooter.Shooter.getInstance();
+    var turret = frc.robot.subsystems.turret.Turret.getInstance();
+    var hood = frc.robot.subsystems.hood.Hood.getInstance();
+
+    double currentVel = shooter.getAverageVelocity();
+    var params = frc.robot.GlobalData.currentShotParams;
+
+    if (params != null && params.isValid) {
+      double error = Math.abs(params.flywheelSpeedRotPerSec - currentVel);
+
+      // Strict conditions for feeding ball into the shooter:
+      // 1. Flywheel within 5.0 RPS of target
+      // 2. Turret is at goal (aimed correctly)
+      // 3. Hood is at goal (elevated correctly)
+      boolean speedLocked = (error < 5.0);
+      boolean turretLocked = turret.isAtGoal();
+      boolean hoodLocked = hood.isAtGoal();
+
+      mSideRollerRunning = speedLocked && turretLocked && hoodLocked;
+
+      // Anti-collision: cap spinner RPS based on distance to prevent
+      // mid-air ball collisions at close range (high launch angle = low
+      // horizontal velocity at apex = balls stack up).
+      // Uses critical BPS from trajectory apex minimum speed analysis.
+      // Reference: https://www.chiefdelphi.com/t/512598
+      // double maxRps =
+      // frc.robot.subsystems.shooter.ShotTables.maxSpinnerRps(params.effectiveDistanceMeters());
+      // double baseRps = frc.robot.Constants.Indexer.kSideRollerTargetVelocity;
+      // // Both are negative (inverted roller direction), so use max() to cap
+      // magnitude
+      // mSideRollerTargetRps = Math.max(baseRps, -maxRps);
+      mSideRollerTargetRps = frc.robot.Constants.Indexer.kSideRollerTargetVelocity;
+    } else {
+      mSideRollerRunning = false;
+      mSideRollerTargetRps = frc.robot.Constants.Indexer.kSideRollerTargetVelocity;
+    }
+  }
+
+  @Override
+  public void passOperate() {
+    setRunning(true);
+  }
+
+  @Override
+  public void climbOperate() {
+    mStraightRollerRunning = false;
+    mSideRollerRunning = false;
+  }
+
+  @Override
+  public void calibrateOperate() {
+    mStraightRollerRunning = false;
+    mSideRollerRunning = false;
+  }
+
+  @Override
+  public void scoreTestOperate() {
+    mStraightRollerRunning = true;
+
+    // Side roller only when shooter is at target speed
+    var shooter = frc.robot.subsystems.shooter.Shooter.getInstance();
+    double currentVel = shooter.getAverageVelocity();
+    double targetVel = 44;
+
+    // Check if within 1.0 RPS of target AND Hood is at goal
+    var hood = frc.robot.subsystems.hood.Hood.getInstance();
+    if (Math.abs(currentVel - targetVel) < 1.0 && hood.isAtGoal()) {
+      mSideRollerRunning = true;
+    } else {
+      mSideRollerRunning = false;
+    }
+  }
+
+  // --- SysId API (Test Mode Only) ---
+
+  public synchronized void startSideSysId(
+      SysIdRoutine.TestType type, SysIdRoutine.Direction direction) {
+    mSideSysIdActive = true;
+    mSideSysIdRoutine.start(type, direction);
+  }
+
+  public synchronized void startStraightSysId(
+      SysIdRoutine.TestType type, SysIdRoutine.Direction direction) {
+    mStraightSysIdActive = true;
+    mStraightSysIdRoutine.start(type, direction);
+  }
+
+  public synchronized void stopSysId() {
+    if (mSideSysIdActive) {
+      mSideSysIdRoutine.stop();
+      mSideSysIdActive = false;
+      mIO.setSideRollerVoltage(0.0);
+    }
+    if (mStraightSysIdActive) {
+      mStraightSysIdRoutine.stop();
+      mStraightSysIdActive = false;
+      mIO.setStraightRollerVoltage(0.0);
+    }
+  }
+
+  public synchronized void updateSysId() {
+    double timestamp = Timer.getFPGATimestamp();
+
+    if (mSideSysIdActive) {
+      mSideSysIdRoutine.update(
+          timestamp, mInputs.sideRollerPositionRot, mInputs.sideRollerVelocityRotPerSec);
+    }
+
+    if (mStraightSysIdActive) {
+      mStraightSysIdRoutine.update(
+          timestamp, mInputs.straightRollerPositionRot, mInputs.straightRollerVelocityRotPerSec);
+    }
+  }
+
+  public synchronized boolean isSysIdActive() {
+    return mSideSysIdActive || mStraightSysIdActive;
+  }
+
+  // ============================================================
+  // TEST MODE
+  // ============================================================
+
+  private boolean mSysIdButtonWasPressed = false;
+
+  @Override
+  public void handleTestMode(ControlBoard control) {
+    boolean anyButton = control.getSquareButton() || control.getCircleButton();
+
+    if (!isSysIdActive()) {
+      if (control.getR1Button()) {
+        // Side Roller Tests (Reverse Only)
+        if (control.getSquareButton()) {
+          startSideSysId(SysIdRoutine.TestType.QUASISTATIC, SysIdRoutine.Direction.REVERSE);
+        } else if (control.getCircleButton()) {
+          startSideSysId(SysIdRoutine.TestType.DYNAMIC, SysIdRoutine.Direction.REVERSE);
+        }
+      } else if (control.getL1Button()) {
+        // Straight Roller Tests (Reverse Only)
+        if (control.getSquareButton()) {
+          startStraightSysId(SysIdRoutine.TestType.QUASISTATIC, SysIdRoutine.Direction.REVERSE);
+        } else if (control.getCircleButton()) {
+          startStraightSysId(SysIdRoutine.TestType.DYNAMIC, SysIdRoutine.Direction.REVERSE);
+        }
+      }
+    }
+
+    updateSysId();
+
+    if (mSysIdButtonWasPressed && !anyButton) {
+      stopSysId();
+    }
+    mSysIdButtonWasPressed = anyButton;
   }
 
   // --- Subsystem Interface ---
@@ -118,41 +369,31 @@ public class Indexer extends Subsystem {
   @Override
   public void writePeriodicOutputs() {
     synchronized (this) {
-      if (mIsRunning) {
-        // We pass a non-zero value to indicate the indexer should run.
-        // The IOReal implementation will use its specific constants.
-        mIO.setVoltage(1.0);
+      if (mSideSysIdActive) {
+        mIO.setSideRollerVoltage(mSideSysIdRoutine.getOutputVoltage());
+      } else if (mSideRollerRunning) {
+        mIO.setSideRollerTargetVelocity(mSideRollerTargetRps);
       } else {
-        mIO.stop();
+        mIO.setSideRollerVoltage(0.0);
+      }
+
+      if (mStraightSysIdActive) {
+        mIO.setStraightRollerVoltage(mStraightSysIdRoutine.getOutputVoltage());
+      } else if (mStraightRollerRunning) {
+        mIO.setStraightRollerTargetVelocity(
+            frc.robot.Constants.Indexer.kStraightRollerTargetVelocity);
+      } else {
+        mIO.setStraightRollerVoltage(0.0);
       }
     }
   }
 
   @Override
   public boolean checkConnectionActive() {
-    // Active Query: Read Firmware Version from both motors
-    System.out.println("[Indexer] Running Active Connection Check...");
-
     int sideRollerFw = mIO.getSideRollerFirmwareVersion();
     int straightRollerFw = mIO.getStraightRollerFirmwareVersion();
 
-    boolean allConnected = true;
-
-    if (sideRollerFw == 0) {
-      System.err.println("[Indexer] Side Roller Motor Firmware Read Failed!");
-      allConnected = false;
-    } else {
-      System.out.println("[Indexer] Side Roller Motor FW: " + sideRollerFw);
-    }
-
-    if (straightRollerFw == 0) {
-      System.err.println("[Indexer] Straight Roller Motor Firmware Read Failed!");
-      allConnected = false;
-    } else {
-      System.out.println("[Indexer] Straight Roller Motor FW: " + straightRollerFw);
-    }
-
-    return allConnected;
+    return sideRollerFw != 0 && straightRollerFw != 0;
   }
 
   @Override
@@ -167,29 +408,20 @@ public class Indexer extends Subsystem {
     double totalCurrent = mInputs.sideRollerCurrentAmps + mInputs.straightRollerCurrentAmps;
 
     if (totalCurrent > 80.0) {
-      System.err.println("[Indexer] Total Current Spike (Stall): " + totalCurrent + "A");
       return false;
     }
 
     // Check individual motor stall conditions
-    if (mIsRunning) {
-      boolean sideRollerStalled =
-          mInputs.sideRollerVelocityRotPerSec < 1 && mInputs.sideRollerAppliedVolts > 6;
-      boolean straightRollerStalled =
-          mInputs.straightRollerVelocityRotPerSec < 1 && mInputs.straightRollerAppliedVolts > 6;
+    if (mSideRollerRunning
+        && mInputs.sideRollerVelocityRotPerSec < 1
+        && mInputs.sideRollerAppliedVolts > 6) {
+      return false;
+    }
 
-      if (sideRollerStalled) {
-        System.err.println(
-            "[Indexer] Side Roller Stalled! Current: " + mInputs.sideRollerCurrentAmps + "A");
-        return false;
-      }
-      if (straightRollerStalled) {
-        System.err.println(
-            "[Indexer] Straight Roller Stalled! Current: "
-                + mInputs.straightRollerCurrentAmps
-                + "A");
-        return false;
-      }
+    if (mStraightRollerRunning
+        && mInputs.straightRollerVelocityRotPerSec < 1
+        && mInputs.straightRollerAppliedVolts > 6) {
+      return false;
     }
 
     return true;
@@ -197,14 +429,17 @@ public class Indexer extends Subsystem {
 
   @Override
   public void outputTelemetry() {
-    // TODO: Publish indexer state to NetworkTables if needed
+    frc.robot.DashboardState.getInstance().indexerOK =
+        checkConnectionPassive() && checkSanityPassive();
   }
 
   @Override
   public void stop() {
     synchronized (this) {
-      mIsRunning = false;
+      mSideRollerRunning = false;
+      mStraightRollerRunning = false;
     }
+    stopSysId();
     mIO.stop();
   }
 

@@ -68,8 +68,12 @@ public interface IntakePivotIO {
    * direction to maintain synchronized four-bar linkage motion.
    *
    * @param angle Target pivot angle.
+   * @param feedforwardVolts Arbitrary feedforward voltage to apply.
+   * @param velocity Motion Magic cruise velocity (rot/s).
+   * @param acceleration Motion Magic acceleration (rot/s^2).
    */
-  public default void setPosition(Rotation2d angle) {}
+  public default void setPosition(
+      Rotation2d angle, double feedforwardVolts, double velocity, double acceleration) {}
 
   /**
    * Sets the voltage output of the pivot motors directly (open-loop).

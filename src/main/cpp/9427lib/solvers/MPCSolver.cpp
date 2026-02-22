@@ -38,9 +38,11 @@ MPCSolver::MPCSolver(const Config& config) : config_(config) {
 
     BuildSparsityPattern();
 
-    // Allocation
-    settings_ = (OSQPSettings*)c_malloc(sizeof(OSQPSettings));
-    data_     = (OSQPData*)c_malloc(sizeof(OSQPData));
+    // Allocation - Use c_calloc to ensure and zero-initialize all pointers
+    // This prevents garbage values causing a crash in the destructor if Solve is never called.
+    settings_ = (OSQPSettings*)c_calloc(1, sizeof(OSQPSettings));
+    data_     = (OSQPData*)c_calloc(1, sizeof(OSQPData));
+    work_     = nullptr; // Initialize to prevent crash in destructor if setup fails
 
     if (settings_) {
         osqp_set_default_settings(settings_);
@@ -49,20 +51,18 @@ MPCSolver::MPCSolver(const Config& config) : config_(config) {
         settings_->check_termination = 25;  // Check every 25 iterations
         
         // Balanced MPC Configuration
-        // Tolerance: ~1mm precision - relaxed from 1e-4 to ensure convergence
-        // Reference: OSQP may fail to converge with very tight tolerances
+        // Tolerance: relaxed from 5e-4 to 1e-3 to ensure convergence in real-time
         settings_->eps_abs = 1e-3;
         settings_->eps_rel = 1e-3;
         
-        // Scaling: Critical for numerical stability when Q/R weights span
-        // multiple orders of magnitude. 15 iterations (reduced from 25).
-        settings_->scaling = 15;
+        // Scaling: 25 iterations for better numerical conditioning
+        settings_->scaling = 25;
         
         // ADMM step size: Lower rho improves primal feasibility convergence
         settings_->rho = 0.1;  // Default is 0.1, keep it
         
-        // Max iterations: Increased to ensure convergence with MPC dynamics
-        settings_->max_iter = 20000;
+        // Max iterations: Severely capped to avoid blocking JVM GC via JNI pinning
+        settings_->max_iter = 500;
         
         settings_->warm_start = 1;  // Enable Warm Start for Error-State MPC
     }
@@ -71,9 +71,9 @@ MPCSolver::MPCSolver(const Config& config) : config_(config) {
 MPCSolver::~MPCSolver() {
     if (work_) osqp_cleanup(work_);
     if (data_) {
-        // OSQP data pointers (A, P) need free if we allocated them via c_malloc/csc_matrix
-        // But here we use our std::vectors and pass pointers.
-        // We typically just free the struct.
+        // OSQP data pointers (A, P) are allocated by csc_matrix and MUST be freed
+        if (data_->A) c_free(data_->A);
+        if (data_->P) c_free(data_->P);
         c_free(data_);
     }
     if (settings_) c_free(settings_);
@@ -224,66 +224,57 @@ void MPCSolver::BuildSparsityPattern() {
     u_.resize(n_constraints_, OSQP_INFTY);
 }
 
-void MPCSolver::UpdateProblem(const double* current_state, const double* lin_mats, const double* ref_states) {
+void MPCSolver::UpdateProblem(const double* current_state, const double* lin_mats, const double* ref_states, const double* ref_inputs) {
     int N = config_.horizon;
     int row_offset_dyn = n_vars_; 
 
-    // 1. Update Box Constraints (l, u)
-    // Rows 0..n_vars_-1
+    // 1. Update Box Constraints (Shifted by ref_inputs for delta_u)
+    // Box bounds rows are 0 to n_vars_-1
     for (int k = 0; k <= N; ++k) {
-        // x_k
+        int base = k * (nx_ + nu_);
+        
+        // x_k bounds (usually +/- INF)
         for (int i = 0; i < nx_; ++i) {
-            int idx = k * (nx_ + nu_) + i;
-            l_[idx] = config_.state_min[i];
-            u_[idx] = config_.state_max[i];
+            l_[base + i] = config_.state_min[i];
+            u_[base + i] = config_.state_max[i];
         }
-        // u_k
+
         if (k < N) {
+            // delta_u bounds: (u_min - u_ref) <= delta_u <= (u_max - u_ref)
             for (int i = 0; i < nu_; ++i) {
-                int idx = k * (nx_ + nu_) + nx_ + i;
-                l_[idx] = config_.input_min[i];
-                u_[idx] = config_.input_max[i];
+                double u_ref = ref_inputs[k * nu_ + i];
+                l_[base + nx_ + i] = config_.input_min[i] - u_ref;
+                u_[base + nx_ + i] = config_.input_max[i] - u_ref;
             }
         }
     }
 
-    // 2. Update Dynamics Constraints & Initial State
-    // Row n_vars_ .. end
-    
-    // Initial State: x0 = current_state
-    // Rows: row_offset_dyn + 0..2
+    // 2. Dynamics and Initial State Constraints (Equality l = u)
+    // Row 0..nx-1: x0 = current_state (the error)
     for (int i = 0; i < nx_; ++i) {
-        int idx = row_offset_dyn + i;
-        l_[idx] = current_state[i];
-        u_[idx] = current_state[i];
+        l_[row_offset_dyn + i] = current_state[i];
+        u_[row_offset_dyn + i] = current_state[i];
     }
-
-    // Dynamics Steps: x_{k+1} - A x - B u = 0  => val = 0
-    // Rows: row_offset_dyn + (k+1)*nx ..
+    
+    // Rows subsequent: x_{k+1} - A_k x_k - B_k u_k = 0
+    // Note: Since z contains delta_u, and x is error, the dynamics are simply
+    // x_{k+1} = A x_k + B delta_u.
     for (int k = 0; k < N; ++k) {
-        int base = row_offset_dyn + (k + 1) * nx_;
+        int dyn_row_base = row_offset_dyn + (k+1) * nx_;
         for (int i = 0; i < nx_; ++i) {
-            l_[base + i] = 0.0;
-            u_[base + i] = 0.0;
+            l_[dyn_row_base + i] = 0.0;
+            u_[dyn_row_base + i] = 0.0;
         }
     }
 
     // 3. Update A Matrix Values (The linearized dynamics)
-    // We need to traverse the A_x_ array exactly as we built it in BuildSparsityPattern.
-    // This implies a strict coupling. 
-    // To ensure safety, we re-run the traversal logic but only write to A_x_.
-    
+    // Same sparsity, just update -A and -B entries.
     int A_x_idx = 0;
-    int mat_block_size = 18; // 9 for A, 9 for B
+    int A_mat_size = nx_ * nx_; // Size of A matrix (e.g., 3x3 = 9)
+    int B_mat_size = nx_ * nu_; // Size of B matrix (e.g., 3x3 = 9)
+    int mat_block_size = A_mat_size + B_mat_size; // Total size for A and B for one step
 
     for (int k = 0; k <= N; ++k) {
-        const double* Ak = nullptr;
-        const double* Bk = nullptr;
-        if (k < N) {
-            Ak = &lin_mats[k * mat_block_size + 0]; // A is first 9
-            Bk = &lin_mats[k * mat_block_size + 9]; // B is next 9
-        }
-
         // x_k columns
         for (int i = 0; i < nx_; ++i) {
             A_x_idx++; // Box constraint (value 1.0, skip)
@@ -292,71 +283,44 @@ void MPCSolver::UpdateProblem(const double* current_state, const double* lin_mat
 
             if (k < N) {
                 // Next step A dynamics: -A_k(r, i)
-                // A_k is row-major in dense array: Ak[row*3 + col]
+                // A_k is row-major in dense array: Ak[row*nx_ + col]
                 // We are in col `i`, iterating rows `r`.
+                const double* Ak = &lin_mats[k * mat_block_size + 0]; // A is first A_mat_size elements
                 for (int r = 0; r < nx_; ++r) {
-                    double val = -Ak[r * nx_ + i];
-                    A_x_[A_x_idx++] = val;
+                    A_x_[A_x_idx++] = -Ak[r * nx_ + i];
                 }
             }
         }
 
-        // u_k columns
+        // u_k (delta_u) columns
         if (k < N) {
+           const double* Bk = &lin_mats[k * mat_block_size + A_mat_size]; // B is after A
            for (int i = 0; i < nu_; ++i) {
-               A_x_idx++; // Box constraint (value 1.0, skip)
+               A_x_idx++; // Box constraint (value 1.0) for delta_u limits
 
                // Next step B dynamics: -B_k(r, i)
                for (int r = 0; r < nx_; ++r) {
-                   double val = -Bk[r * nu_ + i]; // B is nx * nu (3x3)
-                   A_x_[A_x_idx++] = val;
+                   A_x_[A_x_idx++] = -Bk[r * nu_ + i];
                }
            }
         }
     }
 
     // 4. Update Linear Cost q (Gradient)
-    // J = (x-xref)^T Q (x-xref) = x^T Q x - 2 xref^T Q x + const
-    // Linear term q = - Q * xref  (factor of 1/2 is usually in 0.5 xPx, so check solvers definition)
-    // OSQP min 1/2 x'Px + q'x
-    // So if cost is (x-r)'Q(x-r) = x'Qx - 2r'Qx + ... = 1/2 x'(2Q)x + (-2Q r)'x
-    // Our P matrix has 'Q' on diagonal. That effectively means P = Q (if we assume 1/2 factor in solver).
-    // Wait, OSQP objective is 1/2 x'Px + q'x.
-    // If we want to minimize 1/2 (x - r)' Q (x - r) = 1/2 x'Qx - r'Qx
-    // Then P = Q, q = -Q * r.
-    
-    // HOWEVER, typically we define P = Q directly.
-    // So P has Q values.
-    // q vector should be -Q * ref for states, -R * ref for inputs (usually 0).
-    
+    // Minimize x'Qx + delta_u'R delta_u.
+    // q = [Q*x_ref_offset, R*u_ref_offset...]
+    // Since x is error, we want x to be 0 -> q_x = 0.
+    // Since u is delta, we want delta_u to be 0 -> q_u = 0.
     for (int k = 0; k < n_vars_; ++k) {
-        q_[k] = 0; // Default
-        
-        // Find if State or Input
-        int step = k / (nx_ + nu_);
-        int rem  = k % (nx_ + nu_);
-        
-        if (rem < nx_) {
-            // State
-            // Get reference state for this step
-            // ref_states layout: [x0, y0, th0, x1...]
-            double r_val = ref_states[step * nx_ + rem]; 
-            
-            double weight = (k >= n_vars_ - nx_) ? config_.Q_final[rem] : config_.Q[rem];
-            
-            // q = -Q * r
-            // Note: If P already contains 'Q', this is consistent with 1/2 xPx + qx 
-            // matching 1/2 (x-r)Q(x-r).
-            q_[k] = -weight * r_val;
-        } // else Input u, ref usually 0 -> q=0
+        q_[k] = 0.0;
     }
 }
 
-int MPCSolver::Solve(const double* current_state, const double* linearized_matrices, const double* ref_states, double* output_u) {
+int MPCSolver::Solve(const double* current_state, const double* linearized_matrices, const double* ref_states, const double* ref_inputs, double* output_u) {
     if (!data_ || !settings_) return -1;
 
     // 1. Update vectors and A matrix values
-    UpdateProblem(current_state, linearized_matrices, ref_states);
+    UpdateProblem(current_state, linearized_matrices, ref_states, ref_inputs);
 
     // 2. Setup or Update OSQP
     if (!is_initialized_) {
@@ -373,13 +337,27 @@ int MPCSolver::Solve(const double* current_state, const double* linearized_matri
         data_->l = l_.data();
         data_->u = u_.data();
         
-        osqp_setup(&work_, data_, settings_);
-        is_initialized_ = true;
+        c_int setup_res = osqp_setup(&work_, data_, settings_);
+        if (setup_res == 0) {
+            is_initialized_ = true;
+        } else {
+            std::cerr << "[MPC] CRITICAL: osqp_setup failed with error code: " << (int)setup_res << std::endl;
+            // Memory Cleanup: csc_matrix allocated heap memory that must be freed if setup fails
+            if (data_->A) { c_free(data_->A); data_->A = nullptr; }
+            if (data_->P) { c_free(data_->P); data_->P = nullptr; }
+            return (int)setup_res;
+        }
     } else {
         // Hot Update
-        osqp_update_lin_cost(work_, q_.data());
-        osqp_update_bounds(work_, l_.data(), u_.data());
-        osqp_update_A(work_, A_x_.data(), OSQP_NULL, 0); // Update all values
+        c_int res;
+        res = osqp_update_lin_cost(work_, q_.data());
+        if (res != 0) std::cerr << "[MPC] Error: osqp_update_lin_cost failed: " << (int)res << std::endl;
+        
+        res = osqp_update_bounds(work_, l_.data(), u_.data());
+        if (res != 0) std::cerr << "[MPC] Error: osqp_update_bounds failed: " << (int)res << std::endl;
+        
+        res = osqp_update_A(work_, A_x_.data(), NULL, (c_int)A_x_.size());
+        if (res != 0) std::cerr << "[MPC] Error: osqp_update_A failed: " << (int)res << std::endl;
         // Note: P is constant, no update needed.
     }
 
@@ -388,9 +366,12 @@ int MPCSolver::Solve(const double* current_state, const double* linearized_matri
 
     // 4. Extract Result
     if (work_->info->status_val != OSQP_SOLVED && work_->info->status_val != OSQP_SOLVED_INACCURATE) {
-        // Fallback?
-        // std::cerr << "OSQP Failed: " << work_->info->status_val << std::endl;
-        return work_->info->status_val;
+        return (int)work_->info->status_val;
+    }
+
+    // Safety check: Ensure solution is available before dereferencing
+    if (!work_->solution || !work_->solution->x) {
+        return -2; // Custom error code for missing solution
     }
 
     // Result z = [x0, u0, ... ]

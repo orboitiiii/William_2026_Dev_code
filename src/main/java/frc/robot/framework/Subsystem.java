@@ -1,5 +1,8 @@
 package frc.robot.framework;
 
+import frc.robot.ControlBoard;
+import frc.robot.GlobalData;
+
 /**
  * Abstract base class for all robot subsystems.
  *
@@ -10,23 +13,20 @@ package frc.robot.framework;
  *
  * <ol>
  *   <li>{@link #readPeriodicInputs()}: Read all sensors
- *   <li>State Machine Logic (in Looper)
+ *   <li>{@link #operate()}: State machine dispatch based on {@link GlobalData#robotState}
  *   <li>{@link #writePeriodicOutputs()}: Apply actuator commands
  *   <li>{@link #outputTelemetry()}: Publish to dashboard
  * </ol>
  *
- * <p><strong>Attribution</strong>: Based on Team 254's Subsystem architecture.
+ * <p><strong>Architecture (Orbit 1690 Pattern)</strong>: Each subsystem overrides per-state operate
+ * methods ({@code travelOperate()}, {@code scoreOperate()}, etc.) to define its behavior in each
+ * robot state. The base class {@link #operate()} method dispatches to the correct method based on
+ * {@link GlobalData#robotState}.
  *
  * @see SubsystemManager
+ * @see GlobalData
  */
 public abstract class Subsystem {
-  /**
-   * Writes diagnostic information to log files.
-   *
-   * <p>Override to implement subsystem-specific logging.
-   */
-  public void writeToLog() {}
-
   /**
    * Reads all sensor inputs.
    *
@@ -98,6 +98,76 @@ public abstract class Subsystem {
    * @param enabledLooper The looper to register with.
    */
   public abstract void registerEnabledLoops(Looper enabledLooper);
+
+  // ============================================================
+  // PER-STATE OPERATE METHODS (Orbit 1690 Pattern)
+  // ============================================================
+  // Override in subclasses to define behavior for each RobotState.
+  // Default: no-op (mechanism does nothing in that state).
+
+  /** Called when robotState == TRAVEL. Default: no-op. */
+  public void travelOperate() {}
+
+  /** Called when robotState == INTAKE. Default: no-op. */
+  public void intakeOperate() {}
+
+  /** Called when robotState == SCORE. Default: no-op. */
+  public void scoreOperate() {}
+
+  /** Called when robotState == PASS. Default: no-op. */
+  public void passOperate() {}
+
+  /** Called when robotState == CLIMB. Default: no-op. */
+  public void climbOperate() {}
+
+  /** Called when robotState == CALIBRATE. Default: no-op. */
+  public void calibrateOperate() {}
+
+  /** Called when robotState == SCORE_TEST. Default: no-op. */
+  public void scoreTestOperate() {}
+
+  /** Called when robotState == DISABLED. Default: calls {@link #stop()}. */
+  public void disabledOperate() {
+    stop();
+  }
+
+  /**
+   * Dispatches to the appropriate per-state operate method based on {@link GlobalData#robotState}.
+   *
+   * <p>This method is {@code final} — subclasses must NOT override it. Instead, override the
+   * individual per-state methods ({@code travelOperate()}, {@code scoreOperate()}, etc.).
+   *
+   * <p>Called by {@link SubsystemManager} between {@code readPeriodicInputs()} and {@code
+   * writePeriodicOutputs()} every control cycle.
+   */
+  public final void operate() {
+    switch (GlobalData.robotState) {
+      case TRAVEL -> travelOperate();
+      case INTAKE -> intakeOperate();
+      case SCORE -> scoreOperate();
+      case PASS -> passOperate();
+      case CLIMB -> climbOperate();
+      case CALIBRATE -> calibrateOperate();
+      case SCORE_TEST -> scoreTestOperate();
+      case DISABLED -> disabledOperate();
+    }
+  }
+
+  // ============================================================
+  // TEST MODE (Distributed Pattern)
+  // ============================================================
+
+  /**
+   * Handles subsystem-specific test mode logic.
+   *
+   * <p>Override in subclasses to implement SysId, voltage tests, PID tuning, etc. Called by the
+   * test mode handler instead of {@link #operate()}.
+   *
+   * @param control The ControlBoard instance for reading button inputs.
+   */
+  public void handleTestMode(ControlBoard control) {
+    // Default: no-op. Subclasses override for test routines.
+  }
 
   // --- Logging Infrastructure ---
 

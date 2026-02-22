@@ -8,10 +8,8 @@ import edu.wpi.first.math.kinematics.SwerveDriveKinematics;
 import edu.wpi.first.math.kinematics.SwerveDriveOdometry;
 import edu.wpi.first.math.kinematics.SwerveModulePosition;
 import edu.wpi.first.math.kinematics.SwerveModuleState;
-import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import frc.robot.Constants;
-import frc.robot.DashboardState;
-import frc.robot.RobotState;
+import frc.robot.PoseHistory;
 import frc.robot.framework.ILoop;
 import frc.robot.framework.Looper;
 import frc.robot.framework.Subsystem;
@@ -155,17 +153,38 @@ public class Drive extends Subsystem {
 
     mOdometry.update(mInputs.gyroYaw, mModulePositions);
 
-    // Publish to RobotState for vision latency compensation
-    RobotState.getInstance()
+    // Publish pose to RobotState for vision latency compensation
+    PoseHistory.getInstance()
         .addFieldToVehicleObservation(mInputs.timestamp, mOdometry.getPoseMeters());
+
+    // Publish velocity to RobotState for shoot-on-move compensation
+    PoseHistory.getInstance().addFieldVelocityObservation(mInputs.timestamp, getFieldVelocity());
+
+    // Publish IMU motion measurements to RobotState (254 pattern)
+    // Centralizes all IMU data flow to avoid duplicate Pigeon2 references
+    PoseHistory.getInstance()
+        .addDriveMotionMeasurements(
+            mInputs.timestamp,
+            mInputs.gyroYawVelocityRadPerSec,
+            mInputs.gyroPitchVelocityRadPerSec,
+            mInputs.gyroRollVelocityRadPerSec,
+            mInputs.accelMetersPerSec2[0],
+            mInputs.accelMetersPerSec2[1],
+            mInputs.accelMetersPerSec2[2]);
   }
 
   @Override
   public synchronized void writePeriodicOutputs() {
     switch (mCurrentState) {
       case STOP:
-        mDesiredChassisSpeeds = new ChassisSpeeds(0, 0, 0);
-        handleVelocityControl();
+        mDesiredChassisSpeeds.vxMetersPerSecond = 0;
+        mDesiredChassisSpeeds.vyMetersPerSecond = 0;
+        mDesiredChassisSpeeds.omegaRadiansPerSecond = 0;
+        // Do NOT run PID in STOP state. Just output 0V to prevent jitter on enable.
+        for (int i = 0; i < 4; i++) {
+          mIO.setDriveVoltage(i, 0);
+          mIO.setSteerVoltage(i, 0);
+        }
         break;
 
       case TELEOP_DRIVE:
@@ -206,36 +225,265 @@ public class Drive extends Subsystem {
 
   // --- Public API ---
 
-  /**
-   * Sets teleop drive inputs.
-   *
-   * <p>Converts normalized joystick inputs to robot chassis speeds.
-   *
-   * @param translation Normalized translation vector (X=forward, Y=left).
-   * @param rotation Normalized rotation rate (positive = CCW).
-   * @param fieldRelative True for field-relative driving.
-   */
+  private boolean mBorderProtectionEnabled = true;
+  private double mConstraintSpeedFactor = 1.0;
+
   public synchronized void setTeleopInputs(
       Translation2d translation, double rotation, boolean fieldRelative) {
-    double vx = translation.getX() * Constants.Swerve.kMaxDriveVelocity;
-    double vy = translation.getY() * Constants.Swerve.kMaxDriveVelocity;
-    double omega = rotation * Constants.Swerve.kMaxAngularVelocity;
+    double vx = translation.getX() * Constants.Swerve.kMaxDriveVelocity * mConstraintSpeedFactor;
+    double vy = translation.getY() * Constants.Swerve.kMaxDriveVelocity * mConstraintSpeedFactor;
+    double omega = rotation * Constants.Swerve.kMaxAngularVelocity * mConstraintSpeedFactor;
+
+    if (mBorderProtectionEnabled
+        && !frc.robot.DashboardState.getInstance().isDriveProtectDisabled()) {
+      // 1. Only protect if intake pivot is down AND wheels are spinning
+      boolean intakeActive =
+          frc.robot.GlobalData.pivotWantsDown
+              && (frc.robot.GlobalData.intakeWheelWantedState
+                      == frc.robot.GlobalData.IntakeActiveState.FORWARD
+                  || frc.robot.GlobalData.intakeWheelWantedState
+                      == frc.robot.GlobalData.IntakeActiveState.REVERSE);
+
+      if (intakeActive) {
+        // Compute the field-relative velocity vector
+        double fieldVx =
+            fieldRelative
+                ? vx
+                : vx
+                        * Math.cos(
+                            frc.robot.subsystems.RobotStateEstimator.getInstance()
+                                .getEstimatedPose()
+                                .getRotation()
+                                .getRadians())
+                    - vy
+                        * Math.sin(
+                            frc.robot.subsystems.RobotStateEstimator.getInstance()
+                                .getEstimatedPose()
+                                .getRotation()
+                                .getRadians());
+        double fieldVy =
+            fieldRelative
+                ? vy
+                : vx
+                        * Math.sin(
+                            frc.robot.subsystems.RobotStateEstimator.getInstance()
+                                .getEstimatedPose()
+                                .getRotation()
+                                .getRadians())
+                    + vy
+                        * Math.cos(
+                            frc.robot.subsystems.RobotStateEstimator.getInstance()
+                                .getEstimatedPose()
+                                .getRotation()
+                                .getRadians());
+
+        double robotX =
+            frc.robot.subsystems.RobotStateEstimator.getInstance().getEstimatedPose().getX();
+        double robotY =
+            frc.robot.subsystems.RobotStateEstimator.getInstance().getEstimatedPose().getY();
+
+        // Dynamic Scaling Factor: 1.0 = full speed, 0.0 = full stop
+        double dynamicScaleX = 1.0;
+        double dynamicScaleY = 1.0;
+
+        // Helper constants for scaling
+        final double kDangerZoneRadius = 1.0; // Starts slowing down 1m before collision
+        final double kMaxSlowdownVelocity =
+            2.0; // The threshold velocity (m/s) that leads to max clamping
+        final double kAbsoluteMinSpeedClamp = 0.2; // Floor of the speed limiter
+
+        // Check 1: Are we driving out of bounds? (Field Edges)
+        if (robotX > (frc.robot.FieldConstants.fieldLength - kDangerZoneRadius) && fieldVx > 0) {
+          double depth = robotX - (frc.robot.FieldConstants.fieldLength - kDangerZoneRadius);
+          double speedFactor =
+              Math.max(
+                  kAbsoluteMinSpeedClamp,
+                  1.0 - (depth / kDangerZoneRadius) * (fieldVx / kMaxSlowdownVelocity));
+          dynamicScaleX = Math.min(dynamicScaleX, speedFactor);
+        }
+        if (robotX < kDangerZoneRadius && fieldVx < 0) {
+          double depth = kDangerZoneRadius - robotX;
+          double speedFactor =
+              Math.max(
+                  kAbsoluteMinSpeedClamp,
+                  1.0 - (depth / kDangerZoneRadius) * (Math.abs(fieldVx) / kMaxSlowdownVelocity));
+          dynamicScaleX = Math.min(dynamicScaleX, speedFactor);
+        }
+        if (robotY > (frc.robot.FieldConstants.fieldWidth - kDangerZoneRadius) && fieldVy > 0) {
+          double depth = robotY - (frc.robot.FieldConstants.fieldWidth - kDangerZoneRadius);
+          double speedFactor =
+              Math.max(
+                  kAbsoluteMinSpeedClamp,
+                  1.0 - (depth / kDangerZoneRadius) * (fieldVy / kMaxSlowdownVelocity));
+          dynamicScaleY = Math.min(dynamicScaleY, speedFactor);
+        }
+        if (robotY < kDangerZoneRadius && fieldVy < 0) {
+          double depth = kDangerZoneRadius - robotY;
+          double speedFactor =
+              Math.max(
+                  kAbsoluteMinSpeedClamp,
+                  1.0 - (depth / kDangerZoneRadius) * (Math.abs(fieldVy) / kMaxSlowdownVelocity));
+          dynamicScaleY = Math.min(dynamicScaleY, speedFactor);
+        }
+
+        // Define generic bounding boxes for obstacles [MinX, MaxX, MinY, MaxY]
+        // Including Blue and Red side obstacles.
+        double[][] obstacleBounds = {
+          // Blue Hub
+          {
+            frc.robot.FieldConstants.Hub.nearLeftCorner.getX(),
+            frc.robot.FieldConstants.Hub.farRightCorner.getX(),
+            frc.robot.FieldConstants.Hub.nearRightCorner.getY(),
+            frc.robot.FieldConstants.Hub.nearLeftCorner.getY()
+          },
+          // Red Hub (Opposing)
+          {
+            frc.robot.FieldConstants.Hub.oppNearRightCorner.getX(),
+            frc.robot.FieldConstants.Hub.oppFarLeftCorner.getX(),
+            frc.robot.FieldConstants.Hub.oppNearRightCorner.getY(),
+            frc.robot.FieldConstants.Hub.oppNearLeftCorner.getY()
+          },
+
+          // Blue Tower
+          {
+            frc.robot.FieldConstants.Tower.frontFaceX - frc.robot.FieldConstants.Tower.depth,
+            frc.robot.FieldConstants.Tower.frontFaceX,
+            frc.robot.FieldConstants.Tower.centerPoint.getY()
+                - frc.robot.FieldConstants.Tower.width / 2.0,
+            frc.robot.FieldConstants.Tower.centerPoint.getY()
+                + frc.robot.FieldConstants.Tower.width / 2.0
+          },
+          // Red Tower
+          {
+            frc.robot.FieldConstants.fieldLength - frc.robot.FieldConstants.Tower.frontFaceX,
+            frc.robot.FieldConstants.fieldLength
+                - frc.robot.FieldConstants.Tower.frontFaceX
+                + frc.robot.FieldConstants.Tower.depth,
+            frc.robot.FieldConstants.Tower.oppCenterPoint.getY()
+                - frc.robot.FieldConstants.Tower.width / 2.0,
+            frc.robot.FieldConstants.Tower.oppCenterPoint.getY()
+                + frc.robot.FieldConstants.Tower.width / 2.0
+          },
+
+          // Blue Left Bump
+          {
+            frc.robot.FieldConstants.LeftBump.nearLeftCorner.getX(),
+            frc.robot.FieldConstants.LeftBump.farRightCorner.getX(),
+            frc.robot.FieldConstants.LeftBump.nearLeftCorner.getY()
+                - frc.robot.FieldConstants.LeftBump.depth,
+            frc.robot.FieldConstants.LeftBump.nearLeftCorner.getY()
+          },
+          // Blue Right Bump
+          {
+            frc.robot.FieldConstants.RightBump.nearLeftCorner.getX(),
+            frc.robot.FieldConstants.RightBump.farRightCorner.getX(),
+            frc.robot.FieldConstants.RightBump.nearLeftCorner.getY()
+                - frc.robot.FieldConstants.RightBump.depth,
+            frc.robot.FieldConstants.RightBump.nearLeftCorner.getY()
+          },
+
+          // Red Left Bump (Opposing)
+          {
+            frc.robot.FieldConstants.LeftBump.oppNearLeftCorner.getX(),
+            frc.robot.FieldConstants.LeftBump.oppFarRightCorner.getX(),
+            frc.robot.FieldConstants.LeftBump.oppNearLeftCorner.getY()
+                - frc.robot.FieldConstants.LeftBump.depth,
+            frc.robot.FieldConstants.LeftBump.oppNearLeftCorner.getY()
+          },
+          // Red Right Bump (Opposing)
+          {
+            frc.robot.FieldConstants.RightBump.oppNearLeftCorner.getX(),
+            frc.robot.FieldConstants.RightBump.oppFarRightCorner.getX(),
+            frc.robot.FieldConstants.RightBump.oppNearLeftCorner.getY()
+                - frc.robot.FieldConstants.RightBump.depth,
+            frc.robot.FieldConstants.RightBump.oppNearLeftCorner.getY()
+          }
+        };
+
+        for (double[] bound : obstacleBounds) {
+          double minX = bound[0];
+          double maxX = bound[1];
+          double minY = bound[2];
+          double maxY = bound[3];
+
+          // Inflate bounds by the danger zone
+          double dangerMinX = minX - kDangerZoneRadius;
+          double dangerMaxX = maxX + kDangerZoneRadius;
+          double dangerMinY = minY - kDangerZoneRadius;
+          double dangerMaxY = maxY + kDangerZoneRadius;
+
+          // Check if robot is inside the danger zone of this obstacle
+          if (robotX > dangerMinX
+              && robotX < dangerMaxX
+              && robotY > dangerMinY
+              && robotY < dangerMaxY) {
+
+            // X-axis interference
+            if (robotX < minX && fieldVx > 0) { // Approaching from Left
+              double depth = robotX - dangerMinX;
+              double speedFactor =
+                  Math.max(
+                      kAbsoluteMinSpeedClamp,
+                      1.0 - (depth / kDangerZoneRadius) * (fieldVx / kMaxSlowdownVelocity));
+              dynamicScaleX = Math.min(dynamicScaleX, speedFactor);
+            } else if (robotX > maxX && fieldVx < 0) { // Approaching from Right
+              double depth = dangerMaxX - robotX;
+              double speedFactor =
+                  Math.max(
+                      kAbsoluteMinSpeedClamp,
+                      1.0
+                          - (depth / kDangerZoneRadius)
+                              * (Math.abs(fieldVx) / kMaxSlowdownVelocity));
+              dynamicScaleX = Math.min(dynamicScaleX, speedFactor);
+            }
+
+            // Y-axis interference
+            if (robotY < minY && fieldVy > 0) { // Approaching from Bottom
+              double depth = robotY - dangerMinY;
+              double speedFactor =
+                  Math.max(
+                      kAbsoluteMinSpeedClamp,
+                      1.0 - (depth / kDangerZoneRadius) * (fieldVy / kMaxSlowdownVelocity));
+              dynamicScaleY = Math.min(dynamicScaleY, speedFactor);
+            } else if (robotY > maxY && fieldVy < 0) { // Approaching from Top
+              double depth = dangerMaxY - robotY;
+              double speedFactor =
+                  Math.max(
+                      kAbsoluteMinSpeedClamp,
+                      1.0
+                          - (depth / kDangerZoneRadius)
+                              * (Math.abs(fieldVy) / kMaxSlowdownVelocity));
+              dynamicScaleY = Math.min(dynamicScaleY, speedFactor);
+            }
+          }
+        }
+        double minScale = Math.min(dynamicScaleX, dynamicScaleY);
+        vx *= minScale;
+        vy *= minScale;
+      }
+    }
 
     if (fieldRelative) {
-      // CRITICAL: Use Odometry rotation (which includes zero-offset) for
-      // field-relative drive.
-      // mInputs.gyroYaw is raw hardware yaw and doesn't respect the "Zero Gyro" user
-      // operation.
-      // If the hardware is mounted 180° offset, raw yaw causes inverted controls even
-      // after zeroing.
       Rotation2d fieldHeading = mOdometry.getPoseMeters().getRotation();
-      mDesiredChassisSpeeds = ChassisSpeeds.fromFieldRelativeSpeeds(vx, vy, omega, fieldHeading);
+      // Reuse existing object to avoid allocation in hot path
+      ChassisSpeeds fieldSpeeds =
+          ChassisSpeeds.fromFieldRelativeSpeeds(vx, vy, omega, fieldHeading);
+
+      // FIX: Do not overwrite trajectory commands if we are in PATH_FOLLOWING mode
+      if (mCurrentState != DriveState.PATH_FOLLOWING) {
+        mDesiredChassisSpeeds.vxMetersPerSecond = fieldSpeeds.vxMetersPerSecond;
+        mDesiredChassisSpeeds.vyMetersPerSecond = fieldSpeeds.vyMetersPerSecond;
+        mDesiredChassisSpeeds.omegaRadiansPerSecond = fieldSpeeds.omegaRadiansPerSecond;
+      }
     } else {
-      mDesiredChassisSpeeds = new ChassisSpeeds(vx, vy, omega);
+      if (mCurrentState != DriveState.PATH_FOLLOWING) {
+        mDesiredChassisSpeeds.vxMetersPerSecond = vx;
+        mDesiredChassisSpeeds.vyMetersPerSecond = vy;
+        mDesiredChassisSpeeds.omegaRadiansPerSecond = omega;
+      }
     }
   }
 
-  /** Transitions to teleop drive state. */
   public synchronized void startTeleop() {
     mCurrentState = DriveState.TELEOP_DRIVE;
   }
@@ -280,7 +528,26 @@ public class Drive extends Subsystem {
     // Odometry calculates the offset instantly: Offset = TargetRot - CurrentGyro.
     mOdometry.resetPosition(mInputs.gyroYaw, mModulePositions, pose);
 
-    System.out.println("[Drive] Odometry reset to: " + pose);
+    // Sync RobotStateEstimator to default/vision pose
+    // This prevents the two estimators from permanently diverging
+    // Only call if RobotStateEstimator is initialized to prevent circular
+    // dependency during startup
+    if (frc.robot.subsystems.RobotStateEstimator.hasInstance()) {
+      frc.robot.subsystems.RobotStateEstimator.getInstance().resetPose(pose);
+    }
+  }
+
+  /**
+   * Sets the gyroscope yaw to a field-relative heading (Orbit2: reset gyro when close/trusted).
+   *
+   * <p>Call only when vision heading is trusted (e.g. close range or multi-tag). Pigeon has ~10–20
+   * ms latency; avoid calling every cycle. Odometry is not reset here; the estimator will fuse
+   * subsequent vision/odometry.
+   *
+   * @param fieldYawDegrees Desired robot heading in field frame (degrees).
+   */
+  public void setGyroYawFromVision(double fieldYawDegrees) {
+    mIO.setGyroYaw(fieldYawDegrees);
   }
 
   /**
@@ -329,7 +596,6 @@ public class Drive extends Subsystem {
   public synchronized void startCalibration() {
     mCalibrationExecuted = false;
     mCurrentState = DriveState.CALIBRATING;
-    System.out.println("[Drive] Starting Swerve module calibration...");
   }
 
   /**
@@ -425,6 +691,7 @@ public class Drive extends Subsystem {
     double voltage = dutyCycle * 12.0;
     for (int i = 0; i < 4; i++) {
       mIO.setDriveVoltage(i, voltage);
+      mIO.setSteerVoltage(i, 0);
     }
   }
 
@@ -435,6 +702,33 @@ public class Drive extends Subsystem {
       mIO.setDriveVoltage(i, 0);
       mIO.setSteerVoltage(i, 0);
     }
+  }
+
+  /**
+   * Stops all motors using OPEN_LOOP state.
+   *
+   * <p>Unlike stop() which uses STOP state (still runs velocity control in writePeriodicOutputs),
+   * this method uses OPEN_LOOP which does NOT apply any control, allowing external voltage settings
+   * to persist without being overwritten.
+   *
+   * <p>Use this in Test Mode to prevent PID from fighting manual wheel alignment.
+   */
+  public synchronized void stopOpenLoop() {
+    mCurrentState = DriveState.OPEN_LOOP;
+    for (int i = 0; i < 4; i++) {
+      mIO.setDriveVoltage(i, 0);
+      mIO.setSteerVoltage(i, 0);
+    }
+  }
+
+  /**
+   * Sets the drive state to OPEN_LOOP without modifying motor outputs.
+   *
+   * <p>Use this before calling setAllDriveMotorsDutyCycle() to prevent writePeriodicOutputs from
+   * overwriting external voltage control.
+   */
+  public synchronized void setOpenLoopState() {
+    mCurrentState = DriveState.OPEN_LOOP;
   }
 
   /**
@@ -451,13 +745,155 @@ public class Drive extends Subsystem {
     resetOdometry(new Pose2d());
   }
 
-  private SwerveModulePosition[] getModulePositions() {
+  public synchronized SwerveModulePosition[] getModulePositions() {
     for (int i = 0; i < 4; i++) {
       mModulePositions[i] =
           mModules[i].getPosition(
               mInputs.drivePositionRotations[i], mInputs.steerPositionRotations[i]);
     }
     return mModulePositions;
+  }
+
+  public synchronized SwerveModuleState[] getModuleStates() {
+    SwerveModuleState[] states = new SwerveModuleState[4];
+    for (int i = 0; i < 4; i++) {
+      states[i] =
+          mModules[i].getState(
+              mInputs.driveVelocityRotationsPerSec[i], mInputs.steerPositionRotations[i]);
+    }
+    return states;
+  }
+
+  /**
+   * Returns the robot-relative velocity computed from wheel odometry.
+   *
+   * <p>Uses inverse kinematics to convert individual module states (wheel velocities) back to
+   * chassis speeds. This represents the robot's velocity in its own reference frame.
+   *
+   * <p><strong>Coordinate Frame</strong>: Robot-relative (+X forward, +Y left, +ω CCW).
+   *
+   * @return The robot-relative velocity as ChassisSpeeds.
+   */
+  public synchronized ChassisSpeeds getRobotVelocity() {
+    return mKinematics.toChassisSpeeds(getModuleStates());
+  }
+
+  /**
+   * Returns the field-relative velocity computed from wheel odometry.
+   *
+   * <p>Transforms the robot-relative velocity to the field coordinate system using the current
+   * heading from odometry. This is required for shoot-on-move calculations where the projectile
+   * inherits the robot's inertial (field-relative) velocity at launch.
+   *
+   * <p><strong>Physics Note</strong>: Field-relative velocity is used because the game piece's
+   * trajectory is governed by Newton's first law in the inertial (field) frame.
+   *
+   * @return The field-relative velocity as ChassisSpeeds.
+   */
+  public synchronized ChassisSpeeds getFieldVelocity() {
+    ChassisSpeeds robotRelative = getRobotVelocity();
+    return ChassisSpeeds.fromRobotRelativeSpeeds(
+        robotRelative, mOdometry.getPoseMeters().getRotation());
+  }
+
+  public SwerveDriveKinematics getKinematics() {
+    return mKinematics;
+  }
+
+  // ============================================================
+  // PER-STATE OPERATE METHODS (Orbit 1690 Pattern)
+  // ============================================================
+  // Drive is special: it keeps its own internal DriveState (TELEOP_DRIVE,
+  // PATH_FOLLOWING, etc.) but reads constraints from GlobalData.
+
+  @Override
+  public void travelOperate() {
+    // Auto mode: trajectory thread controls Drive via setPathFollowingSpeeds().
+    // Skip joystick input to prevent overwriting MPC commands.
+    if (mCurrentState == DriveState.PATH_FOLLOWING) {
+      return;
+    }
+    var control = frc.robot.ControlBoard.getInstance();
+    setTeleopInputs(control.getTranslation(), control.getRotation(), true);
+  }
+
+  @Override
+  public void intakeOperate() {
+    if (mCurrentState == DriveState.PATH_FOLLOWING) {
+      return;
+    }
+    var control = frc.robot.ControlBoard.getInstance();
+    setTeleopInputs(control.getTranslation(), control.getRotation(), true);
+  }
+
+  @Override
+  public void scoreOperate() {
+    if (mCurrentState == DriveState.PATH_FOLLOWING) {
+      return;
+    }
+    var control = frc.robot.ControlBoard.getInstance();
+    setTeleopInputs(control.getTranslation(), control.getRotation(), true);
+  }
+
+  @Override
+  public void passOperate() {
+    if (mCurrentState == DriveState.PATH_FOLLOWING) {
+      return;
+    }
+    var control = frc.robot.ControlBoard.getInstance();
+    setTeleopInputs(control.getTranslation(), control.getRotation(), true);
+  }
+
+  @Override
+  public void climbOperate() {
+    if (mCurrentState == DriveState.PATH_FOLLOWING) {
+      return;
+    }
+    var control = frc.robot.ControlBoard.getInstance();
+    setTeleopInputs(control.getTranslation(), control.getRotation(), true);
+  }
+
+  @Override
+  public void calibrateOperate() {
+    stop();
+    var control = frc.robot.ControlBoard.getInstance();
+    if (control.getCalibrateButton()) {
+      executeCalibrationDirect();
+    }
+    if (control.getZeroGyro()) {
+      zeroSensors();
+    }
+  }
+
+  // ============================================================
+  // TEST MODE (Distributed Pattern)
+  // ============================================================
+
+  /** Test routine selector for Drive. */
+  public enum DriveTestRoutine {
+    SWERVE_CALIBRATION,
+    DRIVE_DIRECTION_TEST
+  }
+
+  private DriveTestRoutine mDriveTestRoutine = DriveTestRoutine.SWERVE_CALIBRATION;
+
+  @Override
+  public void handleTestMode(frc.robot.ControlBoard control) {
+    switch (mDriveTestRoutine) {
+      case SWERVE_CALIBRATION -> {
+        stop();
+        if (control.getCalibrateButton()) {
+          executeCalibrationDirect();
+        }
+        if (control.getZeroGyro()) {
+          zeroSensors();
+        }
+      }
+      case DRIVE_DIRECTION_TEST -> {
+        setOpenLoopState();
+        setAllDriveMotorsDutyCycle(0.1);
+      }
+    }
   }
 
   @Override
@@ -468,9 +904,18 @@ public class Drive extends Subsystem {
           public void onStart(double timestamp) {
             synchronized (Drive.this) {
               // Clear any pending velocity commands
-              mDesiredChassisSpeeds = new ChassisSpeeds(0, 0, 0);
+              mDesiredChassisSpeeds.vxMetersPerSecond = 0;
+              mDesiredChassisSpeeds.vyMetersPerSecond = 0;
+              mDesiredChassisSpeeds.omegaRadiansPerSecond = 0;
 
-              mCurrentState = DriveState.TELEOP_DRIVE;
+              // CRITICAL: Don't override special modes (Test/Calibrate) on startup
+              // Also preserve PATH_FOLLOWING if it was set just before enabling (e.g., auto
+              // init)
+              if (mCurrentState != DriveState.OPEN_LOOP
+                  && mCurrentState != DriveState.CALIBRATING
+                  && mCurrentState != DriveState.PATH_FOLLOWING) {
+                mCurrentState = DriveState.TELEOP_DRIVE;
+              }
             }
           }
 
@@ -505,59 +950,35 @@ public class Drive extends Subsystem {
 
   @Override
   public synchronized boolean checkConnectionActive() {
-    // Active Query: Read Firmware Versions from all CAN devices
-    System.out.println("[Drive] Running Active Connection Check...");
     boolean allOk = true;
 
-    // Check Drive Motors (4x)
     int[] driveFw = mIO.getDriveMotorFirmwareVersions();
     for (int i = 0; i < 4; i++) {
       if (driveFw[i] == 0) {
-        System.err.println("[Drive] Drive Motor " + i + " Firmware Read Failed!");
         allOk = false;
-      } else {
-        System.out.println("[Drive] Drive Motor " + i + " FW: " + driveFw[i]);
       }
     }
 
-    // Check Steer Motors (4x)
     int[] steerFw = mIO.getSteerMotorFirmwareVersions();
     for (int i = 0; i < 4; i++) {
       if (steerFw[i] == 0) {
-        System.err.println("[Drive] Steer Motor " + i + " Firmware Read Failed!");
         allOk = false;
-      } else {
-        System.out.println("[Drive] Steer Motor " + i + " FW: " + steerFw[i]);
       }
     }
 
-    // Check Pigeon
     int pigeonFw = mIO.getPigeonFirmwareVersion();
     if (pigeonFw == 0) {
-      System.err.println("[Drive] Pigeon Firmware Read Failed!");
       allOk = false;
-    } else {
-      System.out.println("[Drive] Pigeon FW: " + pigeonFw);
     }
 
-    System.out.println("[Drive] Active Connection Check Complete. All OK: " + allOk);
     return allOk;
   }
 
   @Override
-  public synchronized boolean checkConnectionPassive() {
-    // Passive: Check cached status from IO layer
-    if (!mInputs.pigeonConnected) {
-      return false;
-    }
+  public boolean checkConnectionPassive() {
+    // Check if any of the 4 steer or 4 drive motors are disconnected
     for (int i = 0; i < 4; i++) {
-      if (!mInputs.driveMotorConnected[i]) {
-        return false;
-      }
-      if (!mInputs.steerMotorConnected[i]) {
-        return false;
-      }
-      if (!mInputs.cancoderConnected[i]) {
+      if (!mInputs.driveMotorConnected[i] || !mInputs.steerMotorConnected[i]) {
         return false;
       }
     }
@@ -565,29 +986,18 @@ public class Drive extends Subsystem {
   }
 
   @Override
-  public synchronized boolean checkSanityPassive() {
-    // kV Model Sanity Check: ω_expected = V_applied / kV
-    // Only check when voltage is applied (avoid divide-by-zero false positives)
-    double kV = Constants.Swerve.Control.kDrivekV;
-    double threshold = 4.0; // Rot/s tolerance
-
+  public boolean checkSanityPassive() {
+    // 1. Module Stall / Overcurrent Detection
     for (int i = 0; i < 4; i++) {
-      double volts = Math.abs(mInputs.driveAppliedVolts[i]);
-      if (volts > 2.0) { // Only check if significant voltage applied
-        double omegaExpected = volts / kV;
-        double omegaMeasured = Math.abs(mInputs.driveVelocityRotationsPerSec[i]);
-        double error = Math.abs(omegaMeasured - omegaExpected);
+      // Drive motor stall (high voltage, low speed)
+      if (Math.abs(mInputs.driveAppliedVolts[i]) > 8.0
+          && Math.abs(mInputs.driveVelocityRotationsPerSec[i]) < 0.5) {
+        return false;
+      }
 
-        if (error > threshold) {
-          System.err.println(
-              "[Drive] Module "
-                  + i
-                  + " Sanity Fail: Expected ω="
-                  + omegaExpected
-                  + " Measured ω="
-                  + omegaMeasured);
-          return false;
-        }
+      // Massive current spike indicating physical bind
+      if (mInputs.driveCurrentAmps[i] > 100.0 || mInputs.steerCurrentAmps[i] > 80.0) {
+        return false;
       }
     }
     return true;
@@ -595,81 +1005,51 @@ public class Drive extends Subsystem {
 
   @Override
   public void outputTelemetry() {
-    DashboardState.getInstance().robotPose = getFusedPose();
+    frc.robot.DashboardState.getInstance().driveOK =
+        checkConnectionPassive() && checkSanityPassive();
+    var dashboard = frc.robot.DashboardState.getInstance();
+    // dashboard.robotPose = getFusedPose();
+    dashboard.robotSlipping = !checkSanityPassive();
+
+    // Debugging Telemetry
+    edu.wpi.first.wpilibj.smartdashboard.SmartDashboard.putNumber(
+        "Drive/GyroYaw", mInputs.gyroYaw.getDegrees());
+    for (int i = 0; i < 4; i++) {
+      edu.wpi.first.wpilibj.smartdashboard.SmartDashboard.putNumber(
+          "Drive/Module" + i + "/AbsPos", mInputs.steerAbsolutePositionRotations[i]);
+      edu.wpi.first.wpilibj.smartdashboard.SmartDashboard.putNumber(
+          "Drive/Module" + i + "/SteerPos", mInputs.steerPositionRotations[i]);
+      edu.wpi.first.wpilibj.smartdashboard.SmartDashboard.putNumber(
+          "Drive/Module" + i + "/DrivePos", mInputs.drivePositionRotations[i]);
+    }
   }
 
   // --- Test Mode Diagnostics ---
 
   /**
-   * Publishes Swerve control error diagnostics to SmartDashboard.
+   * Publishes Swerve control error diagnostics.
    *
-   * <p>Called during Test Mode to provide real-time feedback for PID tuning. Displays for each
-   * module:
-   *
-   * <ul>
-   *   <li><strong>Steer Error</strong>: Angle error in degrees (setpoint - actual)
-   *   <li><strong>Velocity Error</strong>: Speed error in m/s (setpoint - actual)
-   *   <li><strong>Actual Velocity</strong>: Current wheel velocity in m/s
-   *   <li><strong>Setpoint Velocity</strong>: Commanded wheel velocity in m/s
-   * </ul>
-   *
-   * <p><strong>Usage</strong>: Call this from testPeriodic() while running a velocity test.
+   * <p>Called during Test Mode to provide real-time feedback for PID tuning. Output is written to
+   * DashboardState fields.
    */
   public synchronized void publishTestDiagnostics() {
-    for (int i = 0; i < 4; i++) {
-      // Get actual module state from sensors
-      // CRITICAL: Use CANcoder absolute position (normalized to [-0.5, 0.5]
-      // rotations)
-      // instead of TalonFX accumulated position which can be e.g. 4321 rotations
-      double actualAngleRotations = mInputs.steerAbsolutePositionRotations[i];
-      double actualVelocityRotPerSec = mInputs.driveVelocityRotationsPerSec[i];
-      double actualVelocityMps =
-          actualVelocityRotPerSec * Constants.Swerve.Control.kWheelCircumference;
-
-      // Get setpoint from last control cycle
-      double setpointAngleDeg = mLastSetpointStates[i].angle.getDegrees();
-      double setpointVelocityMps = mLastSetpointStates[i].speedMetersPerSecond;
-
-      // Calculate errors - CANcoder is already normalized
-      double actualAngleDeg = actualAngleRotations * 360.0;
-      double steerErrorDeg = setpointAngleDeg - actualAngleDeg;
-      // Normalize to [-180, 180]
-      while (steerErrorDeg > 180) steerErrorDeg -= 360;
-      while (steerErrorDeg < -180) steerErrorDeg += 360;
-
-      double velocityErrorMps = setpointVelocityMps - actualVelocityMps;
-
-      // Publish to SmartDashboard
-      SmartDashboard.putNumber("Swerve/" + MODULE_NAMES[i] + "/SteerError_deg", steerErrorDeg);
-      SmartDashboard.putNumber(
-          "Swerve/" + MODULE_NAMES[i] + "/VelocityError_mps", velocityErrorMps);
-      SmartDashboard.putNumber(
-          "Swerve/" + MODULE_NAMES[i] + "/ActualVelocity_mps", actualVelocityMps);
-      SmartDashboard.putNumber(
-          "Swerve/" + MODULE_NAMES[i] + "/SetpointVelocity_mps", setpointVelocityMps);
-      SmartDashboard.putNumber("Swerve/" + MODULE_NAMES[i] + "/ActualAngle_deg", actualAngleDeg);
-      SmartDashboard.putNumber(
-          "Swerve/" + MODULE_NAMES[i] + "/SetpointAngle_deg", setpointAngleDeg);
-    }
-
-    // Publish gyro data
-    SmartDashboard.putNumber("Swerve/Gyro/Yaw_deg", mInputs.gyroYaw.getDegrees());
-    SmartDashboard.putNumber(
-        "Swerve/Gyro/YawRate_degps", Math.toDegrees(mInputs.gyroYawVelocityRadPerSec));
+    // No-op: diagnostics output via DashboardState
   }
 
   /**
    * Runs a Swerve test with a specified chassis speed and publishes diagnostics.
    *
    * <p>This method sets the desired chassis speeds and caches the setpoint states for error
-   * calculation. Call {@link #publishTestDiagnostics()} separately to publish the error data.
+   * calculation.
    *
    * @param vx Forward velocity in m/s (robot-relative).
    * @param vy Strafe velocity in m/s (robot-relative).
    * @param omega Angular velocity in rad/s.
    */
   public synchronized void runDiagnosticDrive(double vx, double vy, double omega) {
-    mDesiredChassisSpeeds = new ChassisSpeeds(vx, vy, omega);
+    mDesiredChassisSpeeds.vxMetersPerSecond = vx;
+    mDesiredChassisSpeeds.vyMetersPerSecond = vy;
+    mDesiredChassisSpeeds.omegaRadiansPerSecond = omega;
     SwerveModuleState[] setpointStates =
         mSetpointGenerator.generateSetpoint(mDesiredChassisSpeeds, mInputs.driveSupplyVoltage);
 

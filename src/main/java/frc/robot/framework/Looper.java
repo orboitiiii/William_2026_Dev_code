@@ -8,33 +8,33 @@ import java.util.List;
 /**
  * High-frequency periodic loop executor.
  *
- * <p>The Looper runs registered {@link ILoop} instances at 100Hz using a WPILib {@link Notifier}.
- * This provides more deterministic timing than the TimedRobot's 50Hz periodic callbacks.
+ * <p>The Looper runs registered {@link ILoop} instances at 50Hz using a WPILib {@link Notifier}.
+ * This provides more deterministic timing than the TimedRobot's periodic callbacks.
  *
  * <p><strong>Architecture</strong>:
  *
  * <pre>
  * Robot.java
  *    │
- *    ├── mEnabledLooper (100Hz during teleop/auto)
+ *    ├── mEnabledLooper (50Hz during teleop/auto)
  *    │      └── Subsystem loops (Drive, Superstructure, etc.)
  *    │
- *    └── mDisabledLooper (100Hz during disabled)
+ *    └── mDisabledLooper (50Hz during disabled)
  *           └── Diagnostic/calibration loops
  * </pre>
  *
  * <p><strong>Thread Safety</strong>: The Notifier runs in a separate thread. Access to shared state
  * must be synchronized. The {@code mTaskRunningLock} protects the loop list and running flag.
  *
- * <p><strong>Timing Specification</strong>: 100Hz = 10ms period.
+ * <p><strong>Timing Specification</strong>: 50Hz = 20ms period.
  *
  * <p><strong>Attribution</strong>: Based on Team 254's Looper architecture.
  *
  * @see ILoop
  */
 public class Looper implements ILoop {
-  /** Loop period in seconds (100Hz = 0.01s). */
-  public static final double kPeriod = 0.01;
+  /** Loop period in seconds (50Hz = 0.02s). */
+  public static final double kPeriod = 0.02;
 
   private boolean mRunning;
 
@@ -52,14 +52,19 @@ public class Looper implements ILoop {
         public void run() {
           synchronized (mTaskRunningLock) {
             if (mRunning) {
-              double now = Timer.getFPGATimestamp();
+              try {
+                double now = Timer.getFPGATimestamp();
 
-              for (ILoop loop : mLoops) {
-                loop.onLoop(now);
+                for (ILoop loop : mLoops) {
+                  loop.onLoop(now);
+                }
+
+                mDt = now - mTimestamp;
+                mTimestamp = now;
+              } catch (Throwable t) {
+                System.err.println("CRITICAL: Looper Crash Detected!");
+                t.printStackTrace();
               }
-
-              mDt = now - mTimestamp;
-              mTimestamp = now;
             }
           }
         }
@@ -79,7 +84,6 @@ public class Looper implements ILoop {
   @Override
   public synchronized void onStart(double timestamp) {
     if (!mRunning) {
-      System.out.println("Starting loops");
       synchronized (mTaskRunningLock) {
         mTimestamp = timestamp;
         for (ILoop loop : mLoops) {
@@ -103,25 +107,14 @@ public class Looper implements ILoop {
   @Override
   public synchronized void onStop(double timestamp) {
     if (mRunning) {
-      System.out.println("Stopping loops");
       mNotifier.stop();
       synchronized (mTaskRunningLock) {
         mRunning = false;
         for (ILoop loop : mLoops) {
-          System.out.println("Stopping " + loop);
           loop.onStop(timestamp);
         }
       }
     }
-  }
-
-  /**
-   * Publishes loop timing to telemetry.
-   *
-   * <p>Exposes the measured dt for monitoring control loop performance.
-   */
-  public void outputToSmartDashboard() {
-    // DashboardState.getInstance().looperDt = mDt;
   }
 
   /**

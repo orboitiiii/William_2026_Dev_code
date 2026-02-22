@@ -20,6 +20,9 @@ public interface IndexerIO {
    */
   public static class IndexerIOInputs {
     // --- Side Roller Motor ---
+    /** Side roller motor position in rotations. */
+    public double sideRollerPositionRot;
+
     /** Side roller motor velocity in rotations per second. */
     public double sideRollerVelocityRotPerSec;
 
@@ -33,6 +36,9 @@ public interface IndexerIO {
     public boolean sideRollerConnected = true;
 
     // --- Straight Roller Motor ---
+    /** Straight roller motor position in rotations. */
+    public double straightRollerPositionRot;
+
     /** Straight roller motor velocity in rotations per second. */
     public double straightRollerVelocityRotPerSec;
 
@@ -57,14 +63,48 @@ public interface IndexerIO {
   public default void updateInputs(IndexerIOInputs inputs) {}
 
   /**
+   * Sets the voltage output for the Side Roller motor.
+   *
+   * @param volts Voltage command (-12 to +12).
+   */
+  public default void setSideRollerVoltage(double volts) {}
+
+  /**
+   * Sets the voltage output for the Straight Roller motor.
+   *
+   * @param volts Voltage command (-12 to +12).
+   */
+  public default void setStraightRollerVoltage(double volts) {}
+
+  /**
+   * Sets the target velocity for the Side Roller motor.
+   *
+   * @param velocityRotPerSec Target velocity in rotations per second.
+   */
+  public default void setSideRollerTargetVelocity(double velocityRotPerSec) {}
+
+  /**
+   * Sets the target velocity for the Straight Roller motor.
+   *
+   * @param velocityRotPerSec Target velocity in rotations per second.
+   */
+  public default void setStraightRollerTargetVelocity(double velocityRotPerSec) {}
+
+  /**
    * Sets the voltage output for both indexer motors.
    *
    * <p>Both the Side Roller and Straight Roller will receive the same voltage command to ensure
    * synchronized operation.
    *
    * @param volts Voltage command (-12 to +12).
+   * @deprecated Use {@link #setSideRollerVoltage(double)} and {@link
+   *     #setStraightRollerVoltage(double)} instead.
    */
-  public default void setVoltage(double volts) {}
+  @Deprecated
+  public default void setVoltage(double volts) {
+    setSideRollerVoltage(volts);
+    setStraightRollerVoltage(volts);
+  }
 
   /** Stops both indexer motors by setting output to zero. */
   public default void stop() {}

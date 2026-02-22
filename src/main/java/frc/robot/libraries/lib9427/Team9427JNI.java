@@ -38,15 +38,12 @@ public class Team9427JNI {
         String osName = System.getProperty("os.name");
         // Fallback for development on Windows
         if (osName.startsWith("Windows")) {
-          System.out.println("Debugging JNI Load: user.dir = " + System.getProperty("user.dir"));
           File dll =
               new File("build/libs/team9427JNI/shared/windowsx86-64/release/Team9427JNI.dll");
           if (!dll.exists()) {
             dll = new File("build/libs/team9427JNI/shared/windowsx86-64/debug/Team9427JNI.dll");
           }
           if (dll.exists()) {
-            System.out.println(
-                "Debugging JNI Load: File Found. Loading from " + dll.getAbsolutePath());
             System.load(dll.getAbsolutePath());
           } else {
             System.err.println("CRITICAL: JNI DLL not found in release or debug paths.");
@@ -72,13 +69,13 @@ public class Team9427JNI {
    *
    * <p><strong>LQR Problem</strong>: Find K that minimizes J = Σ (xᵀQx + uᵀRu)
    *
-   * @param A Discrete state matrix (states × states).
-   * @param B Discrete input matrix (states × inputs).
-   * @param Q State cost matrix (states × states).
-   * @param R Input cost matrix (inputs × inputs).
+   * @param A Discrete state matrix (states ? states).
+   * @param B Discrete input matrix (states ? inputs).
+   * @param Q State cost matrix (states ? states).
+   * @param R Input cost matrix (inputs ? inputs).
    * @param states Number of states.
    * @param inputs Number of inputs.
-   * @return Gain matrix K (inputs × states).
+   * @return Gain matrix K (inputs ? states).
    */
   public static native double[] computeLQR(
       double[] A, double[] B, double[] Q, double[] R, int states, int inputs);
@@ -86,7 +83,7 @@ public class Team9427JNI {
   /**
    * Computes feedforward using plant inversion.
    *
-   * <p><strong>Formula</strong>: u_ff = B⁺ (r_{next} - A * r_k)
+   * <p><strong>Formula</strong>: u_ff = B??(r_{next} - A * r_k)
    *
    * @param A Discrete state matrix.
    * @param B Discrete input matrix.
@@ -180,7 +177,7 @@ public class Team9427JNI {
   /**
    * Creates an elevator linear system model.
    *
-   * @param Kt Motor torque constant (N⋅m/A).
+   * @param Kt Motor torque constant (N?m/A).
    * @param Kv Motor velocity constant (rad/s/V).
    * @param R Motor resistance (Ω).
    * @param m Mass (kg).
@@ -197,7 +194,7 @@ public class Team9427JNI {
    * @param Kt Motor torque constant.
    * @param Kv Motor velocity constant.
    * @param R Motor resistance.
-   * @param J Moment of inertia (kg⋅m²).
+   * @param J Moment of inertia (kg?m²).
    * @param G Gear ratio.
    * @return Concatenated [A, B].
    */
@@ -522,58 +519,4 @@ public class Team9427JNI {
    * @return True if inside hexagon.
    */
   public static native boolean isInsideHexagon(double xInch, double yInch);
-
-  // --- Model Predictive Control (MPC) ---
-
-  /**
-   * Creates a native MPC solver instance (OSQP backend).
-   *
-   * @param horizon Prediction horizon (N).
-   * @param dt Time step [s].
-   * @param Q State cost weights [x, y, theta] (size 3).
-   * @param R Input cost weights [vx, vy, omega] (size 3).
-   * @param Qf Final state cost weights [x, y, theta] (size 3).
-   * @param min_u Min control inputs [vx, vy, omega] (size 3).
-   * @param max_u Max control inputs [vx, vy, omega] (size 3).
-   * @param min_x Min state limits [x, y, theta] (size 3).
-   * @param max_x Max state limits [x, y, theta] (size 3).
-   * @return Native handle.
-   */
-  public static native long createMPCNative(
-      int horizon,
-      double dt,
-      double[] Q,
-      double[] R,
-      double[] Qf,
-      double[] min_u,
-      double[] max_u,
-      double[] min_x,
-      double[] max_x);
-
-  /**
-   * Deletes a native MPC solver instance.
-   *
-   * @param handle Native handle from createMPC.
-   */
-  public static native void deleteMPC(long handle);
-
-  /**
-   * Solves the MPC optimization problem.
-   *
-   * <p><strong>Zero Allocation</strong>: This method uses JNI direct access to arrays to avoid
-   * garbage collection pressure.
-   *
-   * @param handle Native handle.
-   * @param currentState Current robot state [x, y, theta] (size 3).
-   * @param linearizedMatrices Flattened A/B matrices from LinearizedTrajectoryGenerator.
-   * @param refStates Flattened reference trajectory states [x, y, theta...] (size 3 * N).
-   * @param outputU Output buffer for control input [vx, vy, omega] (size 3).
-   * @return Solver status code (0 = Success).
-   */
-  public static native int solveMPCNative(
-      long handle,
-      double[] currentState,
-      double[] linearizedMatrices,
-      double[] refStates,
-      double[] outputU);
 }

@@ -1,10 +1,10 @@
 package frc.robot.subsystems.drive;
 
 import com.ctre.phoenix6.BaseStatusSignal;
+import com.ctre.phoenix6.SignalLogger;
 import com.ctre.phoenix6.StatusSignal;
 import com.ctre.phoenix6.configs.CANcoderConfiguration;
 import com.ctre.phoenix6.configs.MagnetSensorConfigs;
-import com.ctre.phoenix6.controls.DutyCycleOut;
 import com.ctre.phoenix6.controls.MusicTone;
 import com.ctre.phoenix6.controls.PositionVoltage;
 import com.ctre.phoenix6.controls.VelocityVoltage;
@@ -53,6 +53,8 @@ public class DriveIOReal implements DriveIO {
   private final CANcoder[] mCANCoders = new CANcoder[4];
   private final Pigeon2 mPigeon;
 
+  private Boolean mLastBrakeMode = null;
+
   // --- Cached Status Signals ---
   private final StatusSignal<Angle>[] mDrivePositions;
   private final StatusSignal<AngularVelocity>[] mDriveVelocities;
@@ -68,15 +70,21 @@ public class DriveIOReal implements DriveIO {
 
   private final StatusSignal<Angle> mPigeonYaw;
   private final StatusSignal<AngularVelocity> mPigeonYawRate;
+  private final StatusSignal<AngularVelocity> mPigeonPitchRate;
+  private final StatusSignal<AngularVelocity> mPigeonRollRate;
+  private final StatusSignal<Angle> mPigeonPitch;
+  private final StatusSignal<Angle> mPigeonRoll;
   private final StatusSignal<LinearAcceleration> mPigeonAccelX;
   private final StatusSignal<LinearAcceleration> mPigeonAccelY;
   private final StatusSignal<LinearAcceleration> mPigeonAccelZ;
 
   /** Batched signal array for efficient CAN refresh. */
-  private final BaseStatusSignal[] mAllSignals;
+  private BaseStatusSignal[] mHighFreqSignals;
+
+  private BaseStatusSignal[] mLowFreqSignals;
 
   // --- Control Request Objects (reused to avoid allocation) ---
-  private final DutyCycleOut mDutyCycleOut = new DutyCycleOut(0);
+
   private final VoltageOut mVoltageOut = new VoltageOut(0);
   private final PositionVoltage mPositionOut = new PositionVoltage(0);
   private final VelocityVoltage mVelocityOut = new VelocityVoltage(0);
@@ -84,6 +92,9 @@ public class DriveIOReal implements DriveIO {
   /** Initializes all drive hardware and configures motor controllers. */
   @SuppressWarnings("unchecked")
   public DriveIOReal() {
+    SignalLogger.enableAutoLogging(false);
+    SignalLogger.stop(); // Disable logging to save bandwidth and disk I/O
+
     mDrivePositions = new StatusSignal[4];
     mDriveVelocities = new StatusSignal[4];
     mDriveAppliedVolts = new StatusSignal[4];
@@ -95,7 +106,7 @@ public class DriveIOReal implements DriveIO {
     mSteerCurrents = new StatusSignal[4];
     mSteerAbsolutePositions = new StatusSignal[4];
 
-    mPigeon = new Pigeon2(Constants.Swerve.kPigeonId);
+    mPigeon = new Pigeon2(Constants.Swerve.kPigeonId, Constants.kDriveCANBusName);
 
     // IMPORTANT: MountPose configuration is intentionally NOT set in code.
     // Following Team 254's approach: Use Phoenix Tuner X to calibrate MountPose,
@@ -129,15 +140,24 @@ public class DriveIOReal implements DriveIO {
       Constants.Swerve.kBROffset
     };
 
-    List<BaseStatusSignal> signalsList = new ArrayList<>();
+    // Split signals into High Frequency (Control) and Low Frequency (Telemetry)
+    List<BaseStatusSignal> highFreqList = new ArrayList<>();
+    List<BaseStatusSignal> lowFreqList = new ArrayList<>();
 
     for (int i = 0; i < 4; i++) {
-      mDriveMotors[i] = new TalonFX(driveIds[i]);
-      mSteerMotors[i] = new TalonFX(steerIds[i]);
-      mCANCoders[i] = new CANcoder(cancoderIds[i]);
+      mDriveMotors[i] = new TalonFX(driveIds[i], Constants.kDriveCANBusName);
+      mSteerMotors[i] = new TalonFX(steerIds[i], Constants.kDriveCANBusName);
+      mCANCoders[i] = new CANcoder(cancoderIds[i], Constants.kDriveCANBusName);
 
-      SwerveModuleConfigurator.configure(
-          mDriveMotors[i], mSteerMotors[i], mCANCoders[i], offsets[i]);
+      boolean isModuleValid =
+          SwerveModuleConfigurator.configure(
+              mDriveMotors[i],
+              mSteerMotors[i],
+              mCANCoders[i],
+              Constants.Swerve.kModuleType,
+              offsets[i]);
+
+      Timer.delay(0.1);
 
       // Cache signal references
       mDrivePositions[i] = mDriveMotors[i].getPosition();
@@ -152,42 +172,53 @@ public class DriveIOReal implements DriveIO {
       mSteerCurrents[i] = mSteerMotors[i].getSupplyCurrent();
       mSteerAbsolutePositions[i] = mCANCoders[i].getAbsolutePosition();
 
-      signalsList.add(mDrivePositions[i]);
-      signalsList.add(mDriveVelocities[i]);
-      signalsList.add(mDriveAppliedVolts[i]);
-      signalsList.add(mDriveCurrents[i]);
-      signalsList.add(mDriveSupplyVoltages[i]);
-      signalsList.add(mSteerPositions[i]);
-      signalsList.add(mSteerVelocities[i]);
-      signalsList.add(mSteerAppliedVolts[i]);
-      signalsList.add(mSteerCurrents[i]);
-      signalsList.add(mSteerAbsolutePositions[i]);
+      if (isModuleValid) {
+        // High Frequency: Position and Velocity are critical for Odometry and Control
+        highFreqList.add(mDrivePositions[i]);
+        highFreqList.add(mDriveVelocities[i]);
+        highFreqList.add(mSteerPositions[i]);
+        highFreqList.add(mSteerAbsolutePositions[i]); // Seeding only, but good to have
+
+        // Low Frequency: Voltages and Currents are for telemetry/diagnostics only
+        lowFreqList.add(mDriveAppliedVolts[i]);
+        lowFreqList.add(mDriveCurrents[i]);
+        lowFreqList.add(mDriveSupplyVoltages[i]);
+        lowFreqList.add(mSteerVelocities[i]); // We don't control steer velocity directly
+        lowFreqList.add(mSteerAppliedVolts[i]);
+        lowFreqList.add(mSteerCurrents[i]);
+      } else {
+        System.err.println(
+            "CRITICAL: Module "
+                + i
+                + " FAILED config - Excluding from synchronous updates to prevent Loop Overrun.");
+      }
     }
 
     mPigeonYaw = mPigeon.getYaw();
     mPigeonYawRate = mPigeon.getAngularVelocityZWorld();
+    mPigeonPitchRate = mPigeon.getAngularVelocityYWorld();
+    mPigeonRollRate = mPigeon.getAngularVelocityXWorld();
+    mPigeonPitch = mPigeon.getPitch();
+    mPigeonRoll = mPigeon.getRoll();
     mPigeonAccelX = mPigeon.getAccelerationX();
     mPigeonAccelY = mPigeon.getAccelerationY();
     mPigeonAccelZ = mPigeon.getAccelerationZ();
 
-    signalsList.add(mPigeonYaw);
-    signalsList.add(mPigeonYawRate);
-    signalsList.add(mPigeonAccelX);
-    signalsList.add(mPigeonAccelY);
-    signalsList.add(mPigeonAccelZ);
+    // Pigeon High Frequency
+    highFreqList.add(mPigeonYaw);
+    highFreqList.add(mPigeonYawRate);
 
-    mAllSignals = signalsList.toArray(new BaseStatusSignal[0]);
+    // Pigeon Low Frequency
+    lowFreqList.add(mPigeonPitch);
+    lowFreqList.add(mPigeonRoll);
+    lowFreqList.add(mPigeonPitchRate);
+    lowFreqList.add(mPigeonRollRate);
+    lowFreqList.add(mPigeonAccelX);
+    lowFreqList.add(mPigeonAccelY);
+    lowFreqList.add(mPigeonAccelZ);
 
-    // Configure 100Hz update rate for motor signals
-    BaseStatusSignal.setUpdateFrequencyForAll(100.0, mAllSignals);
-
-    // CRITICAL: Set Pigeon yaw signals to 250Hz (Team 254 approach).
-    // Higher frequency reduces integration error and matches high-frequency
-    // odometry loops.
-    // The Pigeon's internal EKF runs at 800Hz, so 250Hz captures its fused output
-    // accurately.
-    mPigeonYaw.setUpdateFrequency(250.0);
-    mPigeonYawRate.setUpdateFrequency(250.0);
+    mHighFreqSignals = highFreqList.toArray(new BaseStatusSignal[0]);
+    mLowFreqSignals = lowFreqList.toArray(new BaseStatusSignal[0]);
 
     // CAN Bus Optimization (Team 254 approach):
     // Disable or reduce frequency of unused StatusSignals to prevent CAN bus
@@ -196,6 +227,8 @@ public class DriveIOReal implements DriveIO {
     // sent.
     // Without this, default signals at high rates can consume 60%+ of CAN
     // bandwidth.
+    // CRITICAL: We must call optimizeBusUtilization() BEFORE scheduling the user
+    // signals.
     for (TalonFX motor : mDriveMotors) {
       motor.optimizeBusUtilization();
     }
@@ -206,18 +239,48 @@ public class DriveIOReal implements DriveIO {
       encoder.optimizeBusUtilization();
     }
     mPigeon.optimizeBusUtilization();
+
+    // PAUSE: Allow the CAN transmit buffer to drain "Disable" commands before
+    // sending "Enable" commands.
+    // This prevents "CAN Output Buffer Full" and "Could not transmit" errors during
+    // startup.
+    Timer.delay(0.25);
+
+    // Configure Update Frequencies
+    // High Frequency: 50Hz (Matches Loop)
+    BaseStatusSignal.setUpdateFrequencyForAll(50.0, mHighFreqSignals);
+
+    // Low Frequency: 4Hz (Telemetry ~250ms)
+    BaseStatusSignal.setUpdateFrequencyForAll(4.0, mLowFreqSignals);
   }
 
   @Override
   public void updateInputs(DriveIOInputs inputs) {
     inputs.timestamp = Timer.getFPGATimestamp();
 
-    // Synchronous batch refresh of all CAN signals
-    BaseStatusSignal.refreshAll(mAllSignals);
+    // Synchronous batch refresh of High Frequency (Control) signals only
+    // This blocks for up to 20ms waiting for signals.
+    BaseStatusSignal.refreshAll(mHighFreqSignals);
+
+    // Low Frequency signals are NOT refreshed here to avoid blocking.
+    // They are automatically updated in background or we read the last cached
+    // value.
+    // We call waitForUpdate(0) individually which updates the signal object from
+    // the JNI buffer
+    // without waiting for a new frame (since timeout is 0).
+    for (BaseStatusSignal sig : mLowFreqSignals) {
+      if (sig instanceof StatusSignal) {
+        ((StatusSignal<?>) sig).waitForUpdate(0.0);
+      }
+    }
 
     // IMU data
     inputs.gyroYaw = Rotation2d.fromDegrees(mPigeonYaw.getValueAsDouble());
     inputs.gyroYawVelocityRadPerSec = Math.toRadians(mPigeonYawRate.getValueAsDouble());
+    inputs.gyroPitchVelocityRadPerSec = Math.toRadians(mPigeonPitchRate.getValueAsDouble());
+    inputs.gyroRollVelocityRadPerSec = Math.toRadians(mPigeonRollRate.getValueAsDouble());
+    inputs.gyroPitchRad = Math.toRadians(mPigeonPitch.getValueAsDouble());
+    inputs.gyroRollRad = Math.toRadians(mPigeonRoll.getValueAsDouble());
 
     // Convert accelerometer from G to m/s²
     inputs.accelMetersPerSec2[0] = mPigeonAccelX.getValueAsDouble() * 9.81;
@@ -271,6 +334,10 @@ public class DriveIOReal implements DriveIO {
 
   @Override
   public void setDriveBrakeMode(boolean enable) {
+    if (mLastBrakeMode != null && mLastBrakeMode == enable) {
+      return;
+    }
+    mLastBrakeMode = enable;
     var mode = enable ? NeutralModeValue.Brake : NeutralModeValue.Coast;
     for (var m : mDriveMotors) m.setNeutralMode(mode);
   }
@@ -314,8 +381,6 @@ public class DriveIOReal implements DriveIO {
     mCANCoders[moduleIndex].getConfigurator().refresh(config);
     config.MagnetSensor.MagnetOffset = offset;
     mCANCoders[moduleIndex].getConfigurator().apply(config);
-
-    System.out.println("[DriveIOReal] Module " + moduleIndex + " MagnetOffset set to: " + offset);
   }
 
   @Override

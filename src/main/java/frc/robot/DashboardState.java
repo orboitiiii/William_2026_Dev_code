@@ -2,7 +2,6 @@ package frc.robot;
 
 import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.networktables.NetworkTableInstance;
-import edu.wpi.first.networktables.StructPublisher;
 import edu.wpi.first.util.struct.Struct;
 import java.nio.ByteBuffer;
 
@@ -54,46 +53,122 @@ public class DashboardState {
    * Game-specific data from FMS indicating which alliance's goal goes inactive first.
    *
    * <p>Values: 0 = unknown/not yet received, 1 = Red ('R'), 2 = Blue ('B').
-   *
-   * <p>Data becomes available ~3 seconds after Auto ends. Before that, value is 0.
    */
   public byte gameData = 0;
 
-  /**
-   * True if the robot is on the Red Alliance, false otherwise (Blue).
-   *
-   * <p>Derived from DriverStation.getAlliance(). Defaults to false (Blue) if unknown.
-   */
+  /** True if the robot is on the Red Alliance, false otherwise (Blue). */
   public boolean isRedAlliance = false;
 
-  // --- Subsystem Health Status (Updated by HealthCheckLooper) ---
-  // Value: 0 = Error (any check failed), 1 = Healthy (all checks pass)
+  // --- Robot State & Mechanism Data ---
+  /** Robot state string (e.g., "IDLE", "SHOOTING", "INTAKING"). */
+  public String robotState = "IDLE";
 
-  /** Drive subsystem health status. */
-  public byte driveHealth = 1;
+  /** Climb state: 0=Stowed, 1=Extending, 2=Pre-Climb. */
+  public int climbState = 0;
 
-  /** IntakeWheel subsystem health status. */
-  public byte intakeHealth = 1;
+  /** Turret angle in degrees for display. */
+  public double turretAngle = 0.0;
+
+  /** Elevation (hood) angle in degrees for display. */
+  public double elevationAngle = 0.0;
+
+  // --- Alerts ---
+  /** True if robot is slipping (Slot 5 warning). */
+  public boolean robotSlipping = false;
+
+  /** True if robot is impacting (Slot 5 warning). */
+  public boolean robotImpacting = false;
+
+  /** True if odometry is stale (Slot 5 warning). */
+  public boolean odometryStale = false;
+
+  /** Last vision update timestamp in seconds. */
+  public double lastVisionTimestamp = 0.0;
+
+  // --- Subsystem Health (Slot 10) ---
+  public boolean turretOK = true;
+  public boolean hoodOK = true;
+  public boolean shooterOK = true;
+  public boolean intakeWheelsOK = true;
+  public boolean intakePivotOK = true;
+  public boolean indexerOK = true;
+  public boolean driveOK = true;
+  public boolean frontLLOK = true;
 
   // ==========================================
 
-  private final StructPublisher<DashboardState> mPublisher;
+  private final edu.wpi.first.networktables.StructPublisher<DashboardState> mPublisher;
+
+  // Subscribers for Dashboard -> Robot topics
+  private final edu.wpi.first.networktables.IntegerSubscriber mSelectedLevelSub;
+  private final edu.wpi.first.networktables.BooleanSubscriber mShootOnMoveDisabledSub;
+  private final edu.wpi.first.networktables.BooleanSubscriber mPointShootDisabledSub;
+  private final edu.wpi.first.networktables.BooleanSubscriber mAutoPassingDisabledSub;
+  private final edu.wpi.first.networktables.BooleanSubscriber mApriltagDisabledSub;
+  private final edu.wpi.first.networktables.BooleanSubscriber mDriveProtectDisabledSub;
+  private final edu.wpi.first.networktables.DoubleArraySubscriber mRobotFieldPoseSub;
 
   private DashboardState() {
+    NetworkTableInstance inst = NetworkTableInstance.getDefault();
     mPublisher =
-        NetworkTableInstance.getDefault()
-            .getStructTopic("/SmartDashboard/DashboardState", DashboardState.struct)
-            .publish();
+        inst.getStructTopic("/SmartDashboard/DashboardState", DashboardState.struct).publish();
+
+    // Dashboard -> Robot Subscribers
+    mSelectedLevelSub = inst.getIntegerTopic("/SmartDashboard/SelectedLevel").subscribe(1);
+    mShootOnMoveDisabledSub =
+        inst.getBooleanTopic("/SmartDashboard/ShootOnMoveDisabled").subscribe(false);
+    mPointShootDisabledSub =
+        inst.getBooleanTopic("/SmartDashboard/PointShootDisabled").subscribe(false);
+    mAutoPassingDisabledSub =
+        inst.getBooleanTopic("/SmartDashboard/AutoPassingDisabled").subscribe(false);
+    mApriltagDisabledSub =
+        inst.getBooleanTopic("/SmartDashboard/ApriltagDisabled").subscribe(false);
+    mDriveProtectDisabledSub =
+        inst.getBooleanTopic("/SmartDashboard/DriveProtectDisabled").subscribe(false);
+    mRobotFieldPoseSub =
+        inst.getDoubleArrayTopic("/SmartDashboard/Field/Robot")
+            .subscribe(new double[] {0.0, 0.0, 0.0});
   }
 
   /**
-   * Publishes the current state to NetworkTables.
+   * Publishes the current state to NetworkTables as a single struct.
    *
    * <p>Call this once per robot periodic loop after updating all fields.
    */
   public void publish() {
     mPublisher.set(this);
   }
+
+  // --- Subscriber Getters ---
+
+  public int getSelectedLevel() {
+    return (int) mSelectedLevelSub.get();
+  }
+
+  public boolean isShootOnMoveDisabled() {
+    return mShootOnMoveDisabledSub.get();
+  }
+
+  public boolean isPointShootDisabled() {
+    return mPointShootDisabledSub.get();
+  }
+
+  public boolean isAutoPassingDisabled() {
+    return mAutoPassingDisabledSub.get();
+  }
+
+  public boolean isApriltagDisabled() {
+    return mApriltagDisabledSub.get();
+  }
+
+  public boolean isDriveProtectDisabled() {
+    return mDriveProtectDisabledSub.get();
+  }
+
+  /** Gets the robot pose set by the dashboard (e.g. for auto preview/init). */
+  // public double[] getDashboardRobotPose() {
+  // return mRobotFieldPoseSub.get();
+  // }
 
   // --- Manual Struct Implementation ---
 
@@ -105,8 +180,34 @@ public class DashboardState {
    *
    * <p>Implements NT4 binary serialization without reflection for performance. The schema string
    * must match the pack/unpack order exactly.
+   *
+   * <p><strong>Schema Layout</strong> (total ~70 bytes):
+   *
+   * <ul>
+   *   <li>matchTime (double, 8 bytes)
+   *   <li>robotPose (Pose2d, 24 bytes)
+   *   <li>gameData (uint8, 1 byte)
+   *   <li>isRedAlliance (bool, 1 byte)
+   *   <li>climbState (int32, 4 bytes)
+   *   <li>turretAngle (double, 8 bytes)
+   *   <li>elevationAngle (double, 8 bytes)
+   *   <li>robotSlipping (bool, 1 byte)
+   *   <li>robotImpacting (bool, 1 byte)
+   *   <li>odometryStale (bool, 1 byte)
+   *   <li>lastVisionTimestamp (double, 8 bytes)
+   *   <li>turretOK..frontLLOK (8 bools, 8 bytes)
+   * </ul>
+   *
+   * <p><strong>Note</strong>: robotState (String) is NOT serialized via struct due to variable
+   * length. Use a separate StringPublisher if needed.
    */
   private static class ManualStruct implements Struct<DashboardState> {
+    // Fixed size: 8 + 24 + 1 + 1 + 4 + 8 + 8 + 1 + 1 + 1 + 8 + 8 + 16 (char[16]) =
+    // 87 bytes
+    // Removed driveHealth(1) and intakeHealth(1)
+    private static final int STRUCT_SIZE =
+        8 + Pose2d.struct.getSize() + 1 + 1 + 4 + 8 + 8 + 1 + 1 + 1 + 8 + 8 + 16;
+
     @Override
     public Class<DashboardState> getTypeClass() {
       return DashboardState.class;
@@ -122,25 +223,19 @@ public class DashboardState {
       return "struct:DashboardState";
     }
 
-    /**
-     * Returns the serialized size in bytes.
-     *
-     * <p>Layout: matchTime(8) + robotPose(24) + gameData(1) + isRedAlliance(1) + driveHealth(1) +
-     * intakeHealth(1) = 36 bytes.
-     */
     @Override
     public int getSize() {
-      return 8 + Pose2d.struct.getSize() + 1 + 1 + 1 + 1;
+      return STRUCT_SIZE;
     }
 
-    /**
-     * Returns the schema string for dashboard clients.
-     *
-     * <p>Must match pack/unpack order for correct deserialization.
-     */
     @Override
     public String getSchema() {
-      return "double matchTime; Pose2d robotPose; uint8 gameData; bool isRedAlliance; uint8 driveHealth; uint8 intakeHealth";
+      return "double matchTime; Pose2d robotPose; uint8 gameData; bool isRedAlliance; "
+          + "int32 climbState; double turretAngle; double elevationAngle; "
+          + "bool robotSlipping; bool robotImpacting; bool odometryStale; double lastVisionTimestamp; "
+          + "char[16] robotState; " // String represented as fixed-length char array
+          + "bool turretOK; bool hoodOK; bool shooterOK; bool intakeWheelsOK; "
+          + "bool intakePivotOK; bool indexerOK; bool driveOK; bool frontLLOK";
     }
 
     @Override
@@ -150,8 +245,27 @@ public class DashboardState {
       state.robotPose = Pose2d.struct.unpack(bb);
       state.gameData = bb.get();
       state.isRedAlliance = bb.get() != 0;
-      state.driveHealth = bb.get();
-      state.intakeHealth = bb.get();
+      state.climbState = bb.getInt();
+      state.turretAngle = bb.getDouble();
+      state.elevationAngle = bb.getDouble();
+      state.robotSlipping = bb.get() != 0;
+      state.robotImpacting = bb.get() != 0;
+      state.odometryStale = bb.get() != 0;
+      state.lastVisionTimestamp = bb.getDouble();
+
+      // Unpack string (char[16])
+      byte[] strBytes = new byte[16];
+      bb.get(strBytes);
+      state.robotState = new String(strBytes, java.nio.charset.StandardCharsets.US_ASCII).trim();
+
+      state.turretOK = bb.get() != 0;
+      state.hoodOK = bb.get() != 0;
+      state.shooterOK = bb.get() != 0;
+      state.intakeWheelsOK = bb.get() != 0;
+      state.intakePivotOK = bb.get() != 0;
+      state.indexerOK = bb.get() != 0;
+      state.driveOK = bb.get() != 0;
+      state.frontLLOK = bb.get() != 0;
       return state;
     }
 
@@ -161,8 +275,28 @@ public class DashboardState {
       Pose2d.struct.pack(bb, value.robotPose);
       bb.put(value.gameData);
       bb.put((byte) (value.isRedAlliance ? 1 : 0));
-      bb.put(value.driveHealth);
-      bb.put(value.intakeHealth);
+      bb.putInt(value.climbState);
+      bb.putDouble(value.turretAngle);
+      bb.putDouble(value.elevationAngle);
+      bb.put((byte) (value.robotSlipping ? 1 : 0));
+      bb.put((byte) (value.robotImpacting ? 1 : 0));
+      bb.put((byte) (value.odometryStale ? 1 : 0));
+      bb.putDouble(value.lastVisionTimestamp);
+
+      // Pack string into exactly 16 bytes (pad with space or truncate)
+      byte[] strBytes = value.robotState.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+      byte[] paddedBytes = new byte[16];
+      System.arraycopy(strBytes, 0, paddedBytes, 0, Math.min(strBytes.length, 16));
+      bb.put(paddedBytes);
+
+      bb.put((byte) (value.turretOK ? 1 : 0));
+      bb.put((byte) (value.hoodOK ? 1 : 0));
+      bb.put((byte) (value.shooterOK ? 1 : 0));
+      bb.put((byte) (value.intakeWheelsOK ? 1 : 0));
+      bb.put((byte) (value.intakePivotOK ? 1 : 0));
+      bb.put((byte) (value.indexerOK ? 1 : 0));
+      bb.put((byte) (value.driveOK ? 1 : 0));
+      bb.put((byte) (value.frontLLOK ? 1 : 0));
     }
   }
 }

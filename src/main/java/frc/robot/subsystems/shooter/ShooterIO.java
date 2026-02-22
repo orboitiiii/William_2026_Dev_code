@@ -72,6 +72,15 @@ public interface ShooterIO {
    */
   public default void setVoltage(double volts) {}
 
+  /**
+   * Sets the target velocity for the shooter motors (closed-loop).
+   *
+   * <p>Uses the hardware-level PID controller (Slot 0).
+   *
+   * @param rotationsPerSec Target velocity in rotations per second.
+   */
+  public default void setTargetVelocity(double rotationsPerSec) {}
+
   /** Stops both shooter motors by setting output to zero and engaging brake mode. */
   public default void stop() {}
 

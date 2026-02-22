@@ -1,12 +1,18 @@
 package frc.robot.subsystems.swerve;
 
+import com.ctre.phoenix6.configs.CANcoderConfiguration;
 import com.ctre.phoenix6.configs.TalonFXConfiguration;
 import com.ctre.phoenix6.hardware.CANcoder;
 import com.ctre.phoenix6.hardware.TalonFX;
+// import com.ctre.phoenix6.signals.AbsoluteSensorRange;
 import com.ctre.phoenix6.signals.FeedbackSensorSourceValue;
 import com.ctre.phoenix6.signals.InvertedValue;
 import com.ctre.phoenix6.signals.NeutralModeValue;
+import com.ctre.phoenix6.signals.SensorDirectionValue;
+import edu.wpi.first.wpilibj.Timer;
 import frc.robot.Constants;
+import frc.robot.Constants.Swerve.SwerveModuleType;
+import frc.robot.util.Phoenix6Util;
 
 /**
  * Phoenix 6 configuration factory for swerve modules.
@@ -38,99 +44,88 @@ public class SwerveModuleConfigurator {
    *
    * @param driveMotor The drive TalonFX instance.
    * @param steerMotor The steer TalonFX instance.
-   * @param cancoder The CANcoder instance.
-   * @param cancoderOffset The MagnetOffset for this module (rotations).
+   * @param encoder The CANcoder instance.
+   * @param moduleType The type of swerve module (e.g., SDS MK4i).
+   * @param steerOffsetRotations The MagnetOffset for this module (rotations).
+   * @return true if all configurations were applied successfully, false otherwise.
    */
-  public static void configure(
-      TalonFX driveMotor, TalonFX steerMotor, CANcoder cancoder, double cancoderOffset) {
+  public static boolean configure(
+      TalonFX driveMotor,
+      TalonFX steerMotor,
+      CANcoder encoder,
+      SwerveModuleType moduleType,
+      double steerOffsetRotations) {
+    boolean allOk = true;
+
+    // --- CANcoder Configuration ---
+    var coderConfig = new CANcoderConfiguration();
+    // coderConfig.MagnetSensor.AbsoluteSensorRange =
+    // AbsoluteSensorRange.Signed_PlusMinus_Half;
+    coderConfig.MagnetSensor.SensorDirection = SensorDirectionValue.CounterClockwise_Positive;
+    coderConfig.MagnetSensor.MagnetOffset = steerOffsetRotations;
+
+    allOk &=
+        Phoenix6Util.checkManeuver(
+            () -> encoder.getConfigurator().apply(coderConfig), "Module Encoder Config");
+
+    Timer.delay(0.1);
 
     // --- Drive Motor Configuration ---
     var driveConfig = new TalonFXConfiguration();
     driveConfig.MotorOutput.NeutralMode = NeutralModeValue.Brake;
+    driveConfig.MotorOutput.Inverted = InvertedValue.CounterClockwise_Positive;
 
-    // Velocity PID gains from SysId characterization
     driveConfig.Slot0.kP = Constants.Swerve.Control.kDrivekP;
     driveConfig.Slot0.kI = Constants.Swerve.Control.kDrivekI;
     driveConfig.Slot0.kD = Constants.Swerve.Control.kDrivekD;
     driveConfig.Slot0.kV = Constants.Swerve.Control.kDrivekV;
 
-    // Current limiting to prevent brownouts during high-torque maneuvers
     driveConfig.CurrentLimits.SupplyCurrentLimit =
         Constants.Swerve.Control.kDriveSupplyCurrentLimit;
     driveConfig.CurrentLimits.SupplyCurrentLimitEnable =
         Constants.Swerve.Control.kDriveSupplyCurrentLimitEnable;
-
-    // Stator current limit for slip protection (Team 254 uses 80A)
     driveConfig.CurrentLimits.StatorCurrentLimit =
         Constants.Swerve.Control.kDriveStatorCurrentLimit;
     driveConfig.CurrentLimits.StatorCurrentLimitEnable =
         Constants.Swerve.Control.kDriveStatorCurrentLimitEnable;
 
-    // Closed-loop ramps for soft-start (prevents initialization overshoot)
-    // First Principles: Limiting dV/dt prevents instantaneous torque spikes
-    // that cause wheel slip and odometry errors during startup.
     driveConfig.ClosedLoopRamps.VoltageClosedLoopRampPeriod =
         Constants.Swerve.Control.kClosedLoopRampPeriod;
-    driveConfig.ClosedLoopRamps.TorqueClosedLoopRampPeriod =
-        Constants.Swerve.Control.kClosedLoopRampPeriod;
-    driveConfig.ClosedLoopRamps.DutyCycleClosedLoopRampPeriod =
-        Constants.Swerve.Control.kClosedLoopRampPeriod;
 
-    // Disable boot/config beeps (Team 254 standard)
-    driveConfig.Audio.BeepOnBoot = false;
-    driveConfig.Audio.BeepOnConfig = false;
-
-    // Gear ratio for mechanism units (wheel rotations, not rotor rotations)
     driveConfig.Feedback.SensorToMechanismRatio = Constants.Swerve.kDriveGearRatio;
+
+    allOk &=
+        Phoenix6Util.checkManeuver(
+            () -> driveMotor.getConfigurator().apply(driveConfig), "Module Drive Motor Config");
+
+    Timer.delay(0.1);
 
     // --- Steer Motor Configuration ---
     var steerConfig = new TalonFXConfiguration();
     steerConfig.MotorOutput.NeutralMode = NeutralModeValue.Brake;
-
-    // SDS modules typically require inverted steer direction
     steerConfig.MotorOutput.Inverted = InvertedValue.CounterClockwise_Positive;
 
-    // Position PID gains
     steerConfig.Slot0.kP = Constants.Swerve.Control.kSteerkP;
     steerConfig.Slot0.kI = Constants.Swerve.Control.kSteerkI;
     steerConfig.Slot0.kD = Constants.Swerve.Control.kSteerkD;
 
-    // Current limiting for steer motors
     steerConfig.CurrentLimits.SupplyCurrentLimit =
         Constants.Swerve.Control.kSteerSupplyCurrentLimit;
     steerConfig.CurrentLimits.SupplyCurrentLimitEnable =
         Constants.Swerve.Control.kSteerSupplyCurrentLimitEnable;
 
-    // Closed-loop ramps for smooth steering (prevents harsh snapping)
     steerConfig.ClosedLoopRamps.VoltageClosedLoopRampPeriod =
         Constants.Swerve.Control.kClosedLoopRampPeriod;
-    steerConfig.ClosedLoopRamps.TorqueClosedLoopRampPeriod =
-        Constants.Swerve.Control.kClosedLoopRampPeriod;
-    steerConfig.ClosedLoopRamps.DutyCycleClosedLoopRampPeriod =
-        Constants.Swerve.Control.kClosedLoopRampPeriod;
 
-    // Disable boot/config beeps (Team 254 standard)
-    steerConfig.Audio.BeepOnBoot = false;
-    steerConfig.Audio.BeepOnConfig = false;
-
-    // Enable continuous wrap for shortest-path steering optimization
+    steerConfig.Feedback.FeedbackRemoteSensorID = encoder.getDeviceID();
+    steerConfig.Feedback.FeedbackSensorSource = FeedbackSensorSourceValue.RemoteCANcoder;
+    steerConfig.Feedback.RotorToSensorRatio = Constants.Swerve.kSteerGearRatio;
     steerConfig.ClosedLoopGeneral.ContinuousWrap = true;
 
-    // Remote CANcoder fusion: motor uses CANcoder for position feedback
-    steerConfig.Feedback.FeedbackRemoteSensorID = cancoder.getDeviceID();
-    steerConfig.Feedback.FeedbackSensorSource = FeedbackSensorSourceValue.RemoteCANcoder;
-    steerConfig.Feedback.SensorToMechanismRatio = 1.0;
-    steerConfig.Feedback.RotorToSensorRatio = Constants.Swerve.kSteerGearRatio;
+    allOk &=
+        Phoenix6Util.checkManeuver(
+            () -> steerMotor.getConfigurator().apply(steerConfig), "Module Steer Motor Config");
 
-    // --- CANcoder Configuration ---
-    var cancoderConfig = new com.ctre.phoenix6.configs.CANcoderConfiguration();
-    cancoderConfig.MagnetSensor.MagnetOffset = cancoderOffset;
-    cancoderConfig.MagnetSensor.SensorDirection =
-        com.ctre.phoenix6.signals.SensorDirectionValue.CounterClockwise_Positive;
-    cancoder.getConfigurator().apply(cancoderConfig);
-
-    // Apply configurations to motors
-    driveMotor.getConfigurator().apply(driveConfig);
-    steerMotor.getConfigurator().apply(steerConfig);
+    return allOk;
   }
 }

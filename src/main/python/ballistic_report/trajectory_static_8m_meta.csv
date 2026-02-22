@@ -1,0 +1,2 @@
+robot_x,robot_y,robot_vx,robot_vy,yaw_deg,pitch_deg,velocity_mps,rpm,tof_s,yaw_lead_deg,target_z
+8.0,0.0,0,0,-180.0,27.013715088177914,12.7670672650138,3999.885559082031,0.7808213434876621,0.0,1.8288

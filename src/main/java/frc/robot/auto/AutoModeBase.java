@@ -83,9 +83,7 @@ public abstract class AutoModeBase {
    *
    * <p>Override in subclasses to perform cleanup or logging.
    */
-  public void done() {
-    System.out.println("[AutoMode] Auto mode done");
-  }
+  public void done() {}
 
   /**
    * Stops the autonomous routine.
@@ -127,13 +125,11 @@ public abstract class AutoModeBase {
    * <p>The routine will resume from where it was interrupted when {@link #resume()} is called.
    */
   public void interrupt() {
-    System.out.println("[AutoMode] Auto mode interrupted!");
     mIsInterrupted = true;
   }
 
   /** Resumes a previously interrupted routine. */
   public void resume() {
-    System.out.println("[AutoMode] Auto mode resumed!");
     mIsInterrupted = false;
   }
 

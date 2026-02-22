@@ -1,43 +1,49 @@
 package frc.robot;
 
+import com.ctre.phoenix6.SignalLogger;
 import edu.wpi.first.wpilibj.DriverStation;
 import edu.wpi.first.wpilibj.TimedRobot;
 import edu.wpi.first.wpilibj.Timer;
 import frc.robot.auto.AutoModeExecutor;
-import frc.robot.auto.modes.TestTrajectoryMode;
 import frc.robot.framework.HealthCheckLooper;
+import frc.robot.framework.ILoop;
 import frc.robot.framework.Looper;
+import frc.robot.framework.Subsystem;
 import frc.robot.framework.SubsystemManager;
-import frc.robot.subsystems.Superstructure;
+import frc.robot.subsystems.RobotStateEstimator;
 import frc.robot.subsystems.drive.Drive;
+import frc.robot.subsystems.hood.Hood;
 import frc.robot.subsystems.indexer.Indexer;
 import frc.robot.subsystems.intake.IntakePivot;
 import frc.robot.subsystems.intake.IntakeWheel;
 import frc.robot.subsystems.shooter.Shooter;
+import frc.robot.subsystems.shooter.ShotCalculator;
+import frc.robot.subsystems.turret.Turret;
+import frc.robot.subsystems.vision.VisionSubsystem;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Main Robot class extending WPILib's TimedRobot framework.
  *
- * <p>This class serves as the entry point for all robot operations. It implements a Team 254-style
- * architecture with the following key components:
+ * <p>Architecture: Orbit 1690 Global State Machine Pattern.
  *
- * <ul>
- *   <li><strong>Looper</strong>: High-frequency (100Hz) control loop executor using WPILib's
- *       Notifier for deterministic timing.
- *   <li><strong>SubsystemManager</strong>: Orchestrates lifecycle calls (readInputs, writeOutputs,
- *       telemetry) across all subsystems.
- *   <li><strong>AutoModeExecutor</strong>: Manages autonomous routines in a separate thread to
- *       avoid blocking the main loop.
- * </ul>
+ * <p>Each control cycle follows this flow:
  *
- * <p><strong>Lifecycle Order</strong>:
+ * <ol>
+ *   <li>{@link StateResolver#getRobotState()} determines the global {@link RobotState}
+ *   <li>Shared data is updated in {@link GlobalData} (e.g., ShotCalculator results)
+ *   <li>SubsystemManager calls: readPeriodicInputs → operate → writePeriodicOutputs
+ *   <li>Each subsystem's operate() dispatches to per-state methods (travelOperate, scoreOperate,
+ *       etc.)
+ * </ol>
  *
- * <pre>
- * robotInit() -> [Mode]Init() -> robotPeriodic() + [Mode]Periodic() -> disabledInit()
- * </pre>
+ * <p>Auto and Teleop share the same loop. The only difference is how {@link GlobalData#robotState}
+ * is determined (buttons vs auto state machine).
  *
- * @see Looper
- * @see SubsystemManager
+ * @see StateResolver
+ * @see GlobalData
+ * @see RobotState
  */
 public class Robot extends TimedRobot {
   private final Looper mEnabledLooper = new Looper();
@@ -45,85 +51,99 @@ public class Robot extends TimedRobot {
   private final SubsystemManager mSubsystemManager = SubsystemManager.getInstance();
 
   private final Drive mDrive = Drive.getInstance();
-  private final Superstructure mSuperstructure = Superstructure.getInstance();
   private final IntakeWheel mIntakeWheel = IntakeWheel.getInstance();
   private final IntakePivot mIntakePivot = IntakePivot.getInstance();
   private final Indexer mIndexer = Indexer.getInstance();
   private final Shooter mShooter = Shooter.getInstance();
+  private final Hood mHood = Hood.getInstance();
+  private final Turret mTurret = Turret.getInstance();
+  private final VisionSubsystem mVisionSubsystem = VisionSubsystem.getInstance();
+  private final RobotStateEstimator mRobotStateEstimator = RobotStateEstimator.getInstance();
 
   private final DashboardState mDashboard = DashboardState.getInstance();
 
-  /** Operator control interface. */
-  public final ControlBoard control = ControlBoard.getInstance();
+  private AutoModeExecutor mAutoModeExecutor = AutoModeExecutor.getInstance();
 
-  private final AutoModeExecutor mAutoModeExecutor = AutoModeExecutor.getInstance();
-
-  /**
-   * Flag indicating Test Mode is active.
-   *
-   * <p>When true, prevents {@link #robotPeriodic()} from calling writePeriodicOutputs, allowing
-   * direct motor control for calibration without state machine interference.
-   */
-  private boolean mIsInTestMode = false;
-
-  /**
-   * Constructs the Robot and registers all subsystems with the framework.
-   *
-   * <p>This is called once when the robot code is first loaded. All subsystem instances should be
-   * acquired here to ensure consistent initialization order.
-   */
   public Robot() {
-    mSubsystemManager.setSubsystems(
-        mDrive, mSuperstructure, mIntakeWheel, mIntakePivot, mIndexer, mShooter);
+    // Register all subsystems — conditionally include Hood/Turret based on feature
+    // flags
+    List<Subsystem> subsystems =
+        new ArrayList<>(
+            List.of(
+                mDrive,
+                mShooter,
+                mIndexer,
+                mRobotStateEstimator,
+                mIntakeWheel,
+                mIntakePivot,
+                mVisionSubsystem,
+                mHood,
+                mTurret));
+    // if (Constants.kHasHood)
+    // subsystems.add(Hood.getInstance());
+    // if (Constants.kHasTurret)
+    // subsystems.add(Turret.getInstance());
+    mSubsystemManager.setSubsystems(subsystems.toArray(new Subsystem[0]));
     mSubsystemManager.registerEnabledLoops(mEnabledLooper);
+
+    // Register the state resolver loop BEFORE SubsystemManager
+    // This ensures GlobalData.robotState is updated before subsystems operate
+    mEnabledLooper.register(
+        new ILoop() {
+          @Override
+          public void onStart(double timestamp) {}
+
+          @Override
+          public void onLoop(double timestamp) {
+            if (GlobalData.isTestMode) {
+              return;
+            } else if (GlobalData.isAutonomous) {
+              // Auto: state determined by auto state machine
+              // (handled by AutoStateMachine when implemented)
+            } else {
+              // Teleop: state determined by joystick buttons
+              GlobalData.robotState = StateResolver.getRobotState();
+            }
+
+            // 2. Update shared data based on current state
+            if (GlobalData.robotState == RobotState.SCORE) {
+              ShotCalculator.getInstance().clearCache();
+              GlobalData.currentShotParams = ShotCalculator.getInstance().calculate();
+            } else {
+              GlobalData.currentShotParams = null;
+            }
+          }
+
+          @Override
+          public void onStop(double timestamp) {}
+        });
+
     mEnabledLooper.register(mSubsystemManager);
+    mDisabledLooper.register(mSubsystemManager);
   }
 
-  /**
-   * Called once when robot code first starts.
-   *
-   * <p>Performs JIT warmup to prevent first-loop latency spikes and zeros all subsystem sensors to
-   * establish a known initial state.
-   */
   @Override
   public void robotInit() {
-    SystemWarmup.warmup();
+    SignalLogger.enableAutoLogging(false);
     mSubsystemManager.getSubsystems().forEach(s -> s.zeroSensors());
 
-    // Run Active Connection Checks (Firmware) once at startup
-    HealthCheckLooper.getInstance().runActiveChecks();
-
-    // Start 1Hz Passive Health Check loop
+    // Disabled active health checks to prevent 6s loop overrun in robotInit
+    // Passive checks in HealthCheckLooper (1Hz) are sufficient.
+    // HealthCheckLooper.getInstance().runActiveChecks();
     HealthCheckLooper.getInstance().start();
+
+    // FORCE initialization of the disabled state.
+    // WPILib's TimedRobot delays calling disabledInit() until the first iteration
+    // or driver station connection, which prevents mDisabledLooper from starting.
+    disabledInit();
   }
 
-  /**
-   * Called every 20ms regardless of robot mode.
-   *
-   * <p>Handles:
-   *
-   * <ul>
-   *   <li>Sensor reading (always)
-   *   <li>Telemetry output (always)
-   *   <li>Actuator output (disabled in Test Mode)
-   *   <li>Dashboard state publication
-   * </ul>
-   */
   @Override
   public void robotPeriodic() {
-    mSubsystemManager.readPeriodicInputs();
     mSubsystemManager.outputTelemetry();
-
-    // Test Mode requires direct motor control; skip state machine outputs
-    if (!mIsInTestMode) {
-      mSubsystemManager.writePeriodicOutputs();
-    }
 
     mDashboard.matchTime = Timer.getMatchTime();
 
-    // Read game-specific data from FMS and encode as byte (0=unknown, 1=Red,
-    // 2=Blue)
-    // Data becomes available ~3s after Auto ends; until then it's an empty string.
     String rawGameData = DriverStation.getGameSpecificMessage();
     if (rawGameData != null && rawGameData.length() > 0) {
       switch (rawGameData.charAt(0)) {
@@ -134,12 +154,10 @@ public class Robot extends TimedRobot {
           mDashboard.gameData = 2;
           break;
         default:
-          // Corrupt data received - treat as unknown
           mDashboard.gameData = 0;
           break;
       }
     } else {
-      // No data yet or null - send unknown
       mDashboard.gameData = 0;
     }
 
@@ -153,251 +171,74 @@ public class Robot extends TimedRobot {
     mDashboard.publish();
   }
 
-  /**
-   * Called once when Teleop mode is enabled.
-   *
-   * <p>Starts the enabled looper and stops the disabled looper.
-   */
   @Override
   public void teleopInit() {
-    mIsInTestMode = false;
+    GlobalData.isTestMode = false;
+    GlobalData.isAutonomous = false;
+    GlobalData.robotState = RobotState.TRAVEL;
+
     mDisabledLooper.onStop(Timer.getFPGATimestamp());
     mEnabledLooper.onStart(Timer.getFPGATimestamp());
   }
 
-  /**
-   * Called every 20ms during Teleop mode.
-   *
-   * <p>Processes operator inputs and forwards them to the Drive subsystem.
-   */
   @Override
-  public void teleopPeriodic() {
-    if (control.getZeroGyro()) {
-      mDrive.zeroSensors();
-    }
+  public void teleopPeriodic() {}
 
-    mDrive.setTeleopInputs(control.getTranslation(), control.getRotation(), true);
-
-    // Intake Toggle: R1 button toggles roller on/off
-    if (control.getIntakeToggle()) {
-      mIntakeWheel.toggle();
-    }
-
-    // Intake Pivot: R1 = forward, L1 = reverse, neither = stop
-    if (control.getPivotForward()) {
-      mIntakePivot.setOpenLoopVoltage(Constants.IntakePivot.kManualVoltage);
-    } else if (control.getPivotReverse()) {
-      mIntakePivot.setOpenLoopVoltage(-Constants.IntakePivot.kManualVoltage);
-    } else {
-      // Neither button pressed - hold current position (closed-loop)
-      mIntakePivot.setOpenLoopVoltage(0);
-    }
-
-    // Indexer: Square button held = run both rollers
-    mIndexer.setRunning(control.getIndexerButton());
-
-    // Shooter: Cross button held = run shooter
-    if (control.getShooterButton()) {
-      mShooter.runVelocityControl();
-    } else {
-      mShooter.stopVelocityControl();
-    }
-  }
-
-  /**
-   * Called once when Autonomous mode is enabled.
-   *
-   * <p>Starts the looper infrastructure and launches the autonomous routine in a separate thread
-   * via {@link AutoModeExecutor}.
-   */
   @Override
   public void autonomousInit() {
-    mIsInTestMode = false;
+    GlobalData.isTestMode = false;
+    GlobalData.isAutonomous = true;
+    GlobalData.robotState = RobotState.TRAVEL;
+
     mDisabledLooper.onStop(Timer.getFPGATimestamp());
     mEnabledLooper.onStart(Timer.getFPGATimestamp());
 
-    mAutoModeExecutor.setAutoMode(new TestTrajectoryMode("HubToLeftGround.csv"));
-    mAutoModeExecutor.start();
-
-    System.out.println("[Robot] Autonomous mode started");
+    // MPC Trajectory auto can be started here:
+    // mAutoModeExecutor.setAutoMode(new
+    // TestTrajectoryMode("path_points_1769604165709.csv"));
+    // mAutoModeExecutor.start();
   }
 
-  /** Called every 20ms during Autonomous mode. Currently no-op; logic runs in Looper. */
   @Override
   public void autonomousPeriodic() {}
 
-  /**
-   * Called once when the robot is disabled.
-   *
-   * <p>Stops all loopers and the autonomous executor to ensure safe shutdown.
-   */
   @Override
   public void disabledInit() {
-    mIsInTestMode = false;
+    GlobalData.isTestMode = false;
+    GlobalData.isAutonomous = false;
+    GlobalData.robotState = RobotState.DISABLED;
+
     mEnabledLooper.onStop(Timer.getFPGATimestamp());
     mDisabledLooper.onStart(Timer.getFPGATimestamp());
 
-    mAutoModeExecutor.stop();
     mSubsystemManager.stop();
   }
 
-  /** Called every 20ms while disabled. Currently no-op. */
   @Override
   public void disabledPeriodic() {}
 
-  /**
-   * Called once when Test mode is enabled.
-   *
-   * <p><strong>Design Rationale</strong>: Test Mode is now dedicated to Shooter SysId
-   * characterization. Other Test Mode features (Swerve calibration, Odometry characterizer) are
-   * temporarily disabled to avoid button conflicts.
-   */
   @Override
   public void testInit() {
-    mIsInTestMode = true;
+    GlobalData.isTestMode = true;
+    GlobalData.isAutonomous = false;
 
     mDisabledLooper.onStop(Timer.getFPGATimestamp());
-    mEnabledLooper.onStop(Timer.getFPGATimestamp());
 
-    mDrive.stop();
-    mShooter.stop();
+    // CRITICAL: Set OPEN_LOOP state BEFORE starting the Looper
+    // This prevents any PID control from running in the first loop iteration
+    mDrive.stopOpenLoop();
+    mIntakePivot.stop();
 
-    System.out.println("========================================");
-    System.out.println("[Robot] Test Mode Enabled - SHOOTER SYSID");
-    System.out.println("Hold button to run test, release to stop & save:");
-    System.out.println("  Triangle: Quasistatic Forward");
-    System.out.println("  Circle:   Quasistatic Reverse");
-    System.out.println("  Square:   Dynamic Forward");
-    System.out.println("  Cross:    VELOCITY CONTROL (35 rot/s)");
-    System.out.println("========================================");
+    // NOW start the main loop
+    // SubsystemManager will call handleTestMode() on each subsystem
+    mEnabledLooper.onStart(Timer.getFPGATimestamp());
   }
 
-  // Track which SysId test was started to detect button release
-  private boolean mSysIdButtonWasPressed = false;
-
-  /**
-   * Called every 20ms during Test mode.
-   *
-   * <p>Dedicated to Shooter SysId characterization. All other Test Mode features are disabled.
-   */
   @Override
-  public void testPeriodic() {
-    // Read inputs for Shooter telemetry
-    mShooter.readPeriodicInputs();
+  public void testPeriodic() {}
 
-    // Determine if any SysId button is currently pressed (excluding Cross for
-    // velocity control)
-    boolean anySysIdButtonPressed =
-        control.getSysIdQuasistaticForward()
-            || control.getSysIdQuasistaticReverse()
-            || control.getSysIdDynamicForward();
-
-    // Cross button = Velocity Control Mode
-    boolean crossPressed = control.getSysIdDynamicReverse();
-
-    // Start SysId test on button press (only if not already running)
-    if (!mShooter.isSysIdActive() && !mShooter.isVelocityControlActive()) {
-      if (control.getSysIdQuasistaticForward()) {
-        mShooter.startSysId(
-            frc.robot.framework.SysIdRoutine.TestType.QUASISTATIC,
-            frc.robot.framework.SysIdRoutine.Direction.FORWARD);
-      } else if (control.getSysIdQuasistaticReverse()) {
-        mShooter.startSysId(
-            frc.robot.framework.SysIdRoutine.TestType.QUASISTATIC,
-            frc.robot.framework.SysIdRoutine.Direction.REVERSE);
-      } else if (control.getSysIdDynamicForward()) {
-        mShooter.startSysId(
-            frc.robot.framework.SysIdRoutine.TestType.DYNAMIC,
-            frc.robot.framework.SysIdRoutine.Direction.FORWARD);
-      }
-    }
-
-    // Update SysId (calculates voltage and applies it)
-    mShooter.updateSysId();
-
-    // Velocity Control: Cross button held = run at target velocity
-    if (crossPressed) {
-      mShooter.runVelocityControl();
-    } else {
-      mShooter.stopVelocityControl();
-    }
-
-    // Stop SysId test when button is released
-    if (mSysIdButtonWasPressed && !anySysIdButtonPressed) {
-      mShooter.stopSysId();
-    }
-
-    mSysIdButtonWasPressed = anySysIdButtonPressed;
-
-    // Publish Shooter velocity to SmartDashboard for monitoring
-    edu.wpi.first.wpilibj.smartdashboard.SmartDashboard.putNumber(
-        "Shooter/Velocity_RPS", mShooter.getAverageVelocity());
-
-    // --- DISABLED: Other Test Mode Features ---
-    // Uncomment these to re-enable after SysId is complete.
-
-    /*
-     * // Calibration: Press A to calibrate swerve offsets
-     * if (control.getCalibrateButton()) {
-     * System.out.
-     * println("[Robot] Calibration button pressed, starting calibration...");
-     * mDrive.executeCalibrationDirect();
-     * }
-     *
-     * // Diagnostic drive: Use joysticks to drive and monitor errors
-     * double vx = control.getTranslation().getX() *
-     * Constants.Swerve.kMaxDriveVelocity;
-     * double vy = control.getTranslation().getY() *
-     * Constants.Swerve.kMaxDriveVelocity;
-     * double omega = control.getRotation() * Constants.Swerve.kMaxAngularVelocity;
-     * mDrive.runDiagnosticDrive(vx, vy, omega);
-     * mDrive.publishTestDiagnostics();
-     *
-     * // Legacy: Y button for simple drive motor spin test
-     * if (control.getTestDriveButton()) {
-     * mDrive.setAllDriveMotorsDutyCycle(0.05);
-     * }
-     *
-     * // --- Odometry Characterization ---
-     * OdometryCharacterizer odoChar = OdometryCharacterizer.getInstance();
-     * if (control.getRecordingToggle()) {
-     * if (odoChar.isRecording()) {
-     * odoChar.cancelRecording();
-     * System.out.println("[OdoChar] Recording cancelled");
-     * } else {
-     * odoChar.startRecording();
-     * System.out.
-     * println("[OdoChar] Recording started - drive robot then return to origin");
-     * }
-     * }
-     * if (odoChar.isRecording()) {
-     * odoChar.update(mDrive.getInputs(), mDrive.getFusedPose());
-     * }
-     * if (control.getEndTrialButton()) {
-     * if (odoChar.isRecording()) {
-     * var error = odoChar.endTrialAndReset(mDrive.getFusedPose());
-     * mDrive.zeroSensors();
-     * System.out.printf(
-     * "[OdoChar] Trial complete! Error: (%.3fm, %.3fm, %.1f°)%n",
-     * error.dx(), error.dy(), Math.toDegrees(error.dTheta()));
-     * }
-     * }
-     * if (control.getExportButton()) {
-     * String filename = "odom_trials_" + System.currentTimeMillis();
-     * odoChar.exportAllTrials(filename);
-     * }
-     */
-  }
-
-  /**
-   * Called once when exiting Test mode.
-   *
-   * <p>Resets the Test Mode flag to restore normal operation.
-   */
   @Override
   public void testExit() {
-    mIsInTestMode = false;
-    mShooter.stopSysId(); // Ensure SysId is stopped
-    System.out.println("[Robot] Exiting Test Mode");
+    GlobalData.isTestMode = false;
   }
 }

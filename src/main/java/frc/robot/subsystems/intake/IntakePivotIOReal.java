@@ -3,47 +3,23 @@ package frc.robot.subsystems.intake;
 import com.ctre.phoenix6.BaseStatusSignal;
 import com.ctre.phoenix6.StatusSignal;
 import com.ctre.phoenix6.configs.TalonFXConfiguration;
-import com.ctre.phoenix6.controls.Follower;
 import com.ctre.phoenix6.controls.MotionMagicVoltage;
 import com.ctre.phoenix6.controls.VoltageOut;
 import com.ctre.phoenix6.hardware.TalonFX;
+import com.ctre.phoenix6.signals.GravityTypeValue;
 import com.ctre.phoenix6.signals.InvertedValue;
-import com.ctre.phoenix6.signals.MotorAlignmentValue;
 import com.ctre.phoenix6.signals.NeutralModeValue;
 import edu.wpi.first.math.geometry.Rotation2d;
 import edu.wpi.first.units.measure.Angle;
 import edu.wpi.first.units.measure.AngularVelocity;
 import edu.wpi.first.units.measure.Current;
 import edu.wpi.first.units.measure.Voltage;
+import edu.wpi.first.wpilibj.Timer;
 import frc.robot.Constants;
 
-/**
- * Real hardware implementation of IntakePivotIO using CTRE Phoenix 6.
- *
- * <p>This class manages CAN communication with the dual-motor intake pivot mechanism for the
- * four-bar linkage.
- *
- * <p><strong>Motor Configuration</strong>:
- *
- * <ul>
- *   <li>Right Motor (ID 30): Leader motor, provides position reference.
- *   <li>Left Motor (ID 31): Follower motor, inverted to produce opposing torque.
- * </ul>
- *
- * <p><strong>Control Strategy</strong>: Uses MotionMagic position control for smooth, trapezoid
- * velocity profiled motion. Both motors are mechanically coupled via the four-bar linkage, so the
- * left motor follows the right motor with opposing inversion.
- *
- * <p><strong>First Principles</strong>: In a four-bar linkage driven by two motors on opposite
- * sides, both motors must apply torque in the same "effective" direction relative to the linkage.
- * Since they are mechanically mirrored, the left motor must spin in the opposite direction to the
- * right motor for synchronized motion.
- *
- * @see IntakePivotIO
- */
 public class IntakePivotIOReal implements IntakePivotIO {
-  private final TalonFX mRightMotor; // Leader
-  private final TalonFX mLeftMotor; // Follower
+  private final TalonFX mRightMotor; // Leader (Right)
+  private final TalonFX mLeftMotor; // Independent (Left)
 
   // --- Cached Status Signals (Right Motor) ---
   private final StatusSignal<Angle> mPosition;
@@ -59,37 +35,50 @@ public class IntakePivotIOReal implements IntakePivotIO {
   private final BaseStatusSignal[] mAllSignals;
 
   // --- Control Request Objects (reused to avoid allocation) ---
-  private final MotionMagicVoltage mMotionMagic = new MotionMagicVoltage(0);
-  private final VoltageOut mVoltageOut = new VoltageOut(0);
-  private final Follower mFollower;
+  private final MotionMagicVoltage mMotionMagic = new MotionMagicVoltage(0).withEnableFOC(true);
+  private final VoltageOut mVoltageOut = new VoltageOut(0).withEnableFOC(true);
+
+  // mCurrentCruiseVel and mCurrentAccel removed as dynamic config is disabled
 
   /**
-   * Initializes the intake pivot motors and configures leader-follower relationship.
+   * Initializes the intake pivot motors in independent control mode.
    *
-   * <p>The right motor (ID 30) acts as the leader with closed-loop position control. The left motor
-   * (ID 31) follows in opposing direction for synchronized four-bar linkage operation.
+   * <p>Both motors are configured with identical parameters (PID, MotionMagic, etc.) but inverted
+   * physically (Right=CW, Left=CCW) to move the mechanism together.
    */
   public IntakePivotIOReal() {
-    mRightMotor = new TalonFX(Constants.IntakePivot.kRightMotorId);
-    mLeftMotor = new TalonFX(Constants.IntakePivot.kLeftMotorId);
+    mRightMotor = new TalonFX(Constants.IntakePivot.kRightMotorId, Constants.kCANBusName);
+    mLeftMotor = new TalonFX(Constants.IntakePivot.kLeftMotorId, Constants.kCANBusName);
 
-    // --- Right Motor (Leader) Configuration ---
+    // --- Right Motor Configuration ---
     var rightConfig = new TalonFXConfiguration();
     rightConfig.MotorOutput.NeutralMode = NeutralModeValue.Brake;
-    // Right motor: CounterClockwise_Positive (standard convention)
-    rightConfig.MotorOutput.Inverted = InvertedValue.CounterClockwise_Positive;
+    // Right motor: Clockwise_Positive (Down = Positive Angle)
+    rightConfig.MotorOutput.Inverted = InvertedValue.Clockwise_Positive;
 
-    // Position PID Gains
+    // --- Slot0 (UP / Fast) ---
     rightConfig.Slot0.kP = Constants.IntakePivot.kP;
     rightConfig.Slot0.kI = Constants.IntakePivot.kI;
     rightConfig.Slot0.kD = Constants.IntakePivot.kD;
     rightConfig.Slot0.kS = Constants.IntakePivot.kS;
     rightConfig.Slot0.kV = Constants.IntakePivot.kV;
-    rightConfig.Slot0.kG = Constants.IntakePivot.kG;
+    rightConfig.Slot0.kA = Constants.IntakePivot.kA;
+    rightConfig.Slot0.kG = 0.0; // Disabled: Using Software Lookup Table
+    rightConfig.Slot0.GravityType = GravityTypeValue.Elevator_Static;
 
-    // Motion Magic configuration for smooth profiled motion
-    rightConfig.MotionMagic.MotionMagicCruiseVelocity = Constants.IntakePivot.kCruiseVelocity;
-    rightConfig.MotionMagic.MotionMagicAcceleration = Constants.IntakePivot.kAcceleration;
+    // --- Slot1 (DOWN / Slow) ---
+    rightConfig.Slot1.kP = Constants.IntakePivot.kP; // Same PID gains for now
+    rightConfig.Slot1.kI = Constants.IntakePivot.kI;
+    rightConfig.Slot1.kD = Constants.IntakePivot.kD;
+    rightConfig.Slot1.kS = Constants.IntakePivot.kS;
+    rightConfig.Slot1.kV = Constants.IntakePivot.kV;
+    rightConfig.Slot1.kA = Constants.IntakePivot.kA;
+    rightConfig.Slot1.kG = 0.0; // Using Lookup Table
+    rightConfig.Slot1.GravityType = GravityTypeValue.Elevator_Static;
+
+    // Motion Magic configuration (Global - optimized for Safety/Down)
+    rightConfig.MotionMagic.MotionMagicCruiseVelocity = Constants.IntakePivot.kCruiseVelocityDown;
+    rightConfig.MotionMagic.MotionMagicAcceleration = Constants.IntakePivot.kAccelerationDown;
 
     // Current limits
     rightConfig.CurrentLimits.SupplyCurrentLimit = Constants.IntakePivot.kSupplyCurrentLimit;
@@ -99,21 +88,69 @@ public class IntakePivotIOReal implements IntakePivotIO {
     rightConfig.CurrentLimits.StatorCurrentLimitEnable =
         Constants.IntakePivot.kStatorCurrentLimitEnable;
 
-    // Gear ratio for accurate position reporting
+    // Gear ratio
     rightConfig.Feedback.SensorToMechanismRatio = Constants.IntakePivot.kGearRatio;
 
-    mRightMotor.getConfigurator().apply(rightConfig);
+    // Soft Limits (Reverse limit offset by -4.0 to prevent trapped MotionMagic
+    // states)
+    rightConfig.SoftwareLimitSwitch.ReverseSoftLimitThreshold =
+        Rotation2d.fromDegrees(Constants.IntakePivot.kMinAngle - 4.0).getRotations();
+    rightConfig.SoftwareLimitSwitch.ReverseSoftLimitEnable = true;
+    rightConfig.SoftwareLimitSwitch.ForwardSoftLimitThreshold =
+        Rotation2d.fromDegrees(Constants.IntakePivot.kMaxAngle).getRotations();
+    rightConfig.SoftwareLimitSwitch.ForwardSoftLimitEnable = true;
 
-    // --- Left Motor (Follower) Configuration ---
+    // Audio Configuration (Silent Operation)
+    rightConfig.Audio.BeepOnBoot = false;
+    rightConfig.Audio.BeepOnConfig = false;
+    rightConfig.Audio.AllowMusicDurDisable = true;
+
+    // Apply Right Config
+    boolean isRightValid =
+        frc.robot.util.Phoenix6Util.checkManeuver(
+            () -> mRightMotor.getConfigurator().apply(rightConfig),
+            "IntakePivot Right Motor Config");
+
+    // --- Initial Position (Right) ---
+    mRightMotor.setPosition(Constants.IntakePivot.kMinAngle);
+    Timer.delay(0.1);
+
+    // --- Left Motor Configuration ---
+    // Clone right config to ensure identical parameters
     var leftConfig = new TalonFXConfiguration();
+    // Manually copy relevant fields or just configure fresh to be safe and explicit
     leftConfig.MotorOutput.NeutralMode = NeutralModeValue.Brake;
-    // Invert left motor?
-    // 254/1678 STANDARD: Keep config "Standard" where possible.
-    // Left Motor = Standard (CCW+).
-    // The "Opposed" Follower update will handle the voltage inversion.
+
+    // INVERSION: Left is physically opposed, so it must be
+    // CounterClockwise_Positive
+    // to match Right's Clockwise_Positive movement.
     leftConfig.MotorOutput.Inverted = InvertedValue.CounterClockwise_Positive;
 
-    // Current limits (same as leader)
+    // Copy Gains for Slot0
+    leftConfig.Slot0.kP = Constants.IntakePivot.kP;
+    leftConfig.Slot0.kI = Constants.IntakePivot.kI;
+    leftConfig.Slot0.kD = Constants.IntakePivot.kD;
+    leftConfig.Slot0.kS = Constants.IntakePivot.kS;
+    leftConfig.Slot0.kV = Constants.IntakePivot.kV;
+    leftConfig.Slot0.kA = Constants.IntakePivot.kA;
+    leftConfig.Slot0.kG = 0.0;
+    leftConfig.Slot0.GravityType = GravityTypeValue.Elevator_Static;
+
+    // Copy Gains for Slot1
+    leftConfig.Slot1.kP = Constants.IntakePivot.kP;
+    leftConfig.Slot1.kI = Constants.IntakePivot.kI;
+    leftConfig.Slot1.kD = Constants.IntakePivot.kD;
+    leftConfig.Slot1.kS = Constants.IntakePivot.kS;
+    leftConfig.Slot1.kV = Constants.IntakePivot.kV;
+    leftConfig.Slot1.kA = Constants.IntakePivot.kA;
+    leftConfig.Slot1.kG = 0.0;
+    leftConfig.Slot1.GravityType = GravityTypeValue.Elevator_Static;
+
+    // Copy Motion Magic (initial, will be updated dynamically)
+    leftConfig.MotionMagic.MotionMagicCruiseVelocity = Constants.IntakePivot.kCruiseVelocityDown;
+    leftConfig.MotionMagic.MotionMagicAcceleration = Constants.IntakePivot.kAccelerationDown;
+
+    // Copy Current Limits
     leftConfig.CurrentLimits.SupplyCurrentLimit = Constants.IntakePivot.kSupplyCurrentLimit;
     leftConfig.CurrentLimits.SupplyCurrentLimitEnable =
         Constants.IntakePivot.kSupplyCurrentLimitEnable;
@@ -121,17 +158,33 @@ public class IntakePivotIOReal implements IntakePivotIO {
     leftConfig.CurrentLimits.StatorCurrentLimitEnable =
         Constants.IntakePivot.kStatorCurrentLimitEnable;
 
-    mLeftMotor.getConfigurator().apply(leftConfig);
+    // Copy Gear Ratio
+    leftConfig.Feedback.SensorToMechanismRatio = Constants.IntakePivot.kGearRatio;
 
-    // --- Follower Control: Left follows Right, Opposed = true ---
-    // 254/1678 STANDARD: Left motor is configured as Standard (CCW+).
-    // Opposed alignment ensures +V on Leader becomes -V on Follower.
-    // Standard Motor with -V -> Spins CW.
-    // Result: Mirrored Motion (CCW/CW) with Opposed Voltage (+V/-V).
-    mFollower = new Follower(Constants.IntakePivot.kRightMotorId, MotorAlignmentValue.Opposed);
-    mLeftMotor.setControl(mFollower);
+    // Copy Soft Limits
+    leftConfig.SoftwareLimitSwitch.ReverseSoftLimitThreshold =
+        rightConfig.SoftwareLimitSwitch.ReverseSoftLimitThreshold;
+    leftConfig.SoftwareLimitSwitch.ReverseSoftLimitEnable = true;
+    leftConfig.SoftwareLimitSwitch.ForwardSoftLimitThreshold =
+        rightConfig.SoftwareLimitSwitch.ForwardSoftLimitThreshold;
+    leftConfig.SoftwareLimitSwitch.ForwardSoftLimitEnable = true;
 
-    // --- Cache Status Signals ---
+    // Audio Configuration
+    leftConfig.Audio.BeepOnBoot = false;
+    leftConfig.Audio.BeepOnConfig = false;
+    leftConfig.Audio.AllowMusicDurDisable = true;
+
+    // Apply Left Config
+    boolean isLeftValid =
+        frc.robot.util.Phoenix6Util.checkManeuver(
+            () -> mLeftMotor.getConfigurator().apply(leftConfig), "IntakePivot Left Motor Config");
+
+    // --- Initial Position (Left) ---
+    mLeftMotor.setPosition(Constants.IntakePivot.kMinAngle);
+    Timer.delay(0.1);
+
+    // --- Configure Updates ---
+    // Cache signals
     mPosition = mRightMotor.getPosition();
     mVelocity = mRightMotor.getVelocity();
     mRightAppliedVolts = mRightMotor.getMotorVoltage();
@@ -139,13 +192,24 @@ public class IntakePivotIOReal implements IntakePivotIO {
     mLeftAppliedVolts = mLeftMotor.getMotorVoltage();
     mLeftCurrent = mLeftMotor.getSupplyCurrent();
 
-    mAllSignals =
-        new BaseStatusSignal[] {
-          mPosition, mVelocity, mRightAppliedVolts, mRightCurrent, mLeftAppliedVolts, mLeftCurrent
-        };
+    if (isRightValid && isLeftValid) {
+      mAllSignals =
+          new BaseStatusSignal[] {
+            mPosition, mVelocity, mRightAppliedVolts, mRightCurrent, mLeftAppliedVolts, mLeftCurrent
+          };
 
-    // Configure 50Hz update rate
-    BaseStatusSignal.setUpdateFrequencyForAll(50.0, mAllSignals);
+      // Optimize bus
+      mRightMotor.optimizeBusUtilization();
+      mLeftMotor.optimizeBusUtilization();
+      Timer.delay(0.05);
+
+      // Set Update Frequency
+      BaseStatusSignal.setUpdateFrequencyForAll(50.0, mAllSignals);
+    } else {
+      mAllSignals = new BaseStatusSignal[0];
+      System.err.println(
+          "CRITICAL: IntakePivot FAILED config - Excluding from synchronous updates.");
+    }
   }
 
   @Override
@@ -166,37 +230,44 @@ public class IntakePivotIOReal implements IntakePivotIO {
   }
 
   @Override
-  public void setPosition(Rotation2d angle) {
-    // Command position to right motor (leader)
-    // Left motor follows automatically via Follower control mode
-    mRightMotor.setControl(mMotionMagic.withPosition(angle.getRotations()));
+  public void setPosition(
+      Rotation2d angle, double feedforwardVolts, double velocity, double acceleration) {
+    // Independent Control: Send same command to both motors
+    // Both motors are configured to move in the physical "positive" direction
+
+    // Dynamic configuration removed (Option A).
+    // Velocity and Acceleration arguments are ignored in favor of global static
+    // config.
+
+    mMotionMagic.Position = angle.getRotations();
+    mMotionMagic.FeedForward = feedforwardVolts;
+    // Slot 0 is used by default
+
+    mRightMotor.setControl(mMotionMagic);
+    mLeftMotor.setControl(mMotionMagic);
   }
 
   @Override
   public void setVoltage(double volts) {
-    // Command voltage to right motor (leader)
-    // Left motor is configured as a Follower (Opposed), so it will automatically
-    // apply the same voltage magnitude but in the opposite direction.
-    // CRITICAL: Do NOT manually command mLeftMotor here, as that would exit
-    // Follower mode!
-    mRightMotor.setControl(mVoltageOut.withOutput(volts));
+    // Independent Control: Send same voltage to both motors
+    var request = mVoltageOut.withOutput(volts);
+    mRightMotor.setControl(request);
+    mLeftMotor.setControl(request);
   }
 
   @Override
   public void stop() {
-    mRightMotor.setControl(mVoltageOut.withOutput(0));
-    // Re-establish follower mode for consistency
-    mLeftMotor.setControl(mFollower);
-    mRightMotor.setControl(mVoltageOut.withOutput(0));
+    var request = mVoltageOut.withOutput(0);
+    mRightMotor.setControl(request);
+    mLeftMotor.setControl(request);
   }
 
   @Override
   public void resetPosition(Rotation2d angle) {
-    mRightMotor.setPosition(angle.getRotations());
-    // Since Left is Standard (CCW+) but moving CW (physically "Up"),
-    // its native position accumulates negatively. We must set negative
-    // to match the physical absolute position.
-    mLeftMotor.setPosition(-angle.getRotations());
+    // Reset both encoders to ensure they stay synced
+    double rotations = angle.getRotations();
+    mRightMotor.setPosition(rotations);
+    mLeftMotor.setPosition(rotations);
   }
 
   @Override

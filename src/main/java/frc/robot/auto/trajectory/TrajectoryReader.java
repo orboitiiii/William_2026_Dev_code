@@ -105,13 +105,6 @@ public class TrajectoryReader {
       throw new IOException("CSV file contains no data points: " + filePath);
     }
 
-    System.out.println(
-        "[TrajectoryReader] Loaded trajectory with "
-            + points.size()
-            + " points, duration: "
-            + points.get(points.size() - 1).timeSeconds()
-            + "s");
-
     return Trajectory.fromPoints(points);
   }
 

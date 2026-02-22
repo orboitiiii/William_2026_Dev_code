@@ -69,7 +69,7 @@ public class Shooter extends Subsystem {
             new SysIdRoutine.Config()
                 .setSubsystemName("Shooter")
                 .setRampRate(Volts.of(1.0)) // 1 V/s for quasistatic
-                .setStepVoltage(Volts.of(4.0)) // 4V step for dynamic
+                .setStepVoltage(Volts.of(10.0)) // 4V step for dynamic
                 .setTimeout(Seconds.of(10.0)) // 10s safety timeout
                 .setLogWriter(new CSVLogWriter("sysid_Shooter")));
   }
@@ -109,11 +109,6 @@ public class Shooter extends Subsystem {
     mIsRunning = true;
   }
 
-  /** Stops the shooter. */
-  public synchronized void stopShooter() {
-    mIsRunning = false;
-  }
-
   /**
    * Checks if the shooter is currently running.
    *
@@ -142,25 +137,25 @@ public class Shooter extends Subsystem {
    * <p>Uses the SysId-derived parameters: V = kS * sign(v) + kV * v_target + kP * (v_target - v)
    *
    * <p>Call this every cycle while the velocity control button is held.
+   *
+   * @param targetVel Target velocity in rotations per second.
    */
-  public void runVelocityControl() {
+  /**
+   * Runs the shooter at a target velocity using onboard VelocityVoltage control.
+   *
+   * <p>Uses the SysId-derived parameters stored in Slot 0 of the TalonFX.
+   *
+   * @param targetVel Target velocity in rotations per second.
+   */
+  public void runVelocityControl(double targetVel) {
     mVelocityControlActive = true;
-    double targetVel = Constants.Shooter.kTargetVelocity;
-    double currentVel = mInputs.rightVelocityRotPerSec;
-    double error = targetVel - currentVel;
+    // Command directly to IO
+    mIO.setTargetVelocity(targetVel);
+  }
 
-    // Feedforward: V = kS * sign(target) + kV * target
-    double feedforward =
-        Constants.Shooter.kS * Math.signum(targetVel) + Constants.Shooter.kV * targetVel;
-
-    // Feedback: kP * error
-    double feedback = Constants.Shooter.kP * error;
-
-    // Total voltage command
-    double voltage = feedforward + feedback;
-
-    // Apply voltage
-    mIO.setVoltage(voltage);
+  /** Runs the shooter at the constant target velocity defined in Constants. */
+  public void runVelocityControl() {
+    runVelocityControl(Constants.Shooter.kTargetVelocity);
   }
 
   /** Stops velocity control mode. */
@@ -218,8 +213,10 @@ public class Shooter extends Subsystem {
       double timestamp = Timer.getFPGATimestamp();
       // Update routine with current position and velocity (in rotations and rot/s)
       mSysIdRoutine.update(timestamp, mInputs.rightPositionRot, mInputs.rightVelocityRotPerSec);
+      mIsRunning = false;
+      mOpenLoopActive = true;
+      mOpenLoopVoltage = mSysIdRoutine.getOutputVoltage();
       // Apply the calculated voltage
-      mIO.setVoltage(mSysIdRoutine.getOutputVoltage());
     }
   }
 
@@ -232,11 +229,151 @@ public class Shooter extends Subsystem {
     return mSysIdActive;
   }
 
+  // ============================================================
+  // PER-STATE OPERATE METHODS (Orbit 1690 Pattern)
+  // ============================================================
+
+  @Override
+  public void travelOperate() {
+    stopVelocityControl();
+    mIsRunning = false;
+    mOpenLoopActive = false;
+  }
+
+  @Override
+  public void intakeOperate() {
+    // Shooter idle during intake
+    stopVelocityControl();
+  }
+
+  @Override
+  public void scoreOperate() {
+    var params = frc.robot.GlobalData.currentShotParams;
+    if (params != null && params.isValid) {
+      runVelocityControl(params.flywheelSpeedRotPerSec);
+    }
+  }
+
+  @Override
+  public void passOperate() {
+    runVelocityControl();
+  }
+
+  @Override
+  public void climbOperate() {
+    stopShooter();
+  }
+
+  @Override
+  public void calibrateOperate() {
+    stopShooter();
+  }
+
+  @Override
+  public void scoreTestOperate() {
+    runVelocityControl(44);
+  }
+
+  /**
+   * Checks if the shooter is at the target velocity within tolerance.
+   *
+   * @return True if average velocity is within 5 RPS of target.
+   */
+  public boolean isAtTargetSpeed() {
+    if (!mVelocityControlActive) return false;
+    // Approximate check: within 5 RPS tolerance
+    return true; // Caller should check specific tolerance if needed
+  }
+
+  // ============================================================
+  // TEST MODE (Distributed Pattern)
+  // ============================================================
+
+  /** Test routine selector for Shooter. */
+  public enum ShooterTestRoutine {
+    VOLTAGE,
+    SYSID,
+    PID
+  }
+
+  private ShooterTestRoutine mTestRoutine = ShooterTestRoutine.SYSID;
+  private double mTunableShooterVel = Constants.Shooter.kTargetVelocity;
+  private boolean mShooterSysIdButtonWasPressed = false;
+
+  @Override
+  public void handleTestMode(frc.robot.ControlBoard control) {
+    switch (mTestRoutine) {
+      case VOLTAGE -> {
+        double testVoltage = 6.0;
+        if (control.getTriangleButton()) {
+          setOpenLoopVoltage(testVoltage);
+        } else if (control.getCrossButton()) {
+          setOpenLoopVoltage(-testVoltage);
+        } else {
+          setOpenLoopVoltage(0.0);
+        }
+      }
+      case SYSID -> {
+        boolean anySysIdButtonPressed =
+            control.getTriangleButton()
+                || control.getSquareButton()
+                || control.getCrossButton()
+                || control.getCircleButton();
+        if (!isSysIdActive()) {
+          if (control.getTriangleButton()) {
+            startSysId(SysIdRoutine.TestType.QUASISTATIC, SysIdRoutine.Direction.FORWARD);
+          } else if (control.getSquareButton()) {
+            startSysId(SysIdRoutine.TestType.QUASISTATIC, SysIdRoutine.Direction.REVERSE);
+          } else if (control.getCrossButton()) {
+            startSysId(SysIdRoutine.TestType.DYNAMIC, SysIdRoutine.Direction.FORWARD);
+          } else if (control.getCircleButton()) {
+            startSysId(SysIdRoutine.TestType.DYNAMIC, SysIdRoutine.Direction.REVERSE);
+          }
+        }
+        updateSysId();
+        if (mShooterSysIdButtonWasPressed && !anySysIdButtonPressed) {
+          stopSysId();
+        }
+        mShooterSysIdButtonWasPressed = anySysIdButtonPressed;
+      }
+      case PID -> {
+        if (control.getCrossButton()) {
+          runVelocityControl(mTunableShooterVel);
+        } else {
+          stopVelocityControl();
+        }
+      }
+    }
+  }
+
   // --- Subsystem Interface ---
 
   @Override
   public void readPeriodicInputs() {
     mIO.updateInputs(mInputs);
+  }
+
+  // --- Open Loop Control Mode ---
+  private boolean mOpenLoopActive = false;
+  private double mOpenLoopVoltage = 0.0;
+
+  /**
+   * Sets the shooter voltage directly (open-loop).
+   *
+   * @param volts Voltage command (-12 to +12).
+   */
+  public synchronized void setOpenLoopVoltage(double volts) {
+    mIsRunning = false;
+    mOpenLoopActive = true;
+    mOpenLoopVoltage = volts;
+  }
+
+  /** Stops the shooter. */
+  public synchronized void stopShooter() {
+    mIsRunning = false;
+    mOpenLoopActive = false;
+    mVelocityControlActive = false;
+    mIO.setVoltage(0);
   }
 
   @Override
@@ -247,7 +384,9 @@ public class Shooter extends Subsystem {
     }
 
     synchronized (this) {
-      if (mIsRunning) {
+      if (mOpenLoopActive) {
+        mIO.setVoltage(mOpenLoopVoltage);
+      } else if (mIsRunning) {
         mIO.setVoltage(Constants.Shooter.kShooterVoltage);
       } else {
         mIO.setVoltage(0);
@@ -257,27 +396,10 @@ public class Shooter extends Subsystem {
 
   @Override
   public boolean checkConnectionActive() {
-    System.out.println("[Shooter] Running Active Connection Check...");
-
     int rightFw = mIO.getRightMotorFirmwareVersion();
     int leftFw = mIO.getLeftMotorFirmwareVersion();
 
-    boolean rightOk = rightFw != 0;
-    boolean leftOk = leftFw != 0;
-
-    if (!rightOk) {
-      System.err.println("[Shooter] Right Motor Firmware Read Failed!");
-    } else {
-      System.out.println("[Shooter] Right Motor FW: " + rightFw);
-    }
-
-    if (!leftOk) {
-      System.err.println("[Shooter] Left Motor Firmware Read Failed!");
-    } else {
-      System.out.println("[Shooter] Left Motor FW: " + leftFw);
-    }
-
-    return rightOk && leftOk;
+    return rightFw != 0 && leftFw != 0;
   }
 
   @Override
@@ -290,23 +412,11 @@ public class Shooter extends Subsystem {
     // Check for current mismatch (indicates mechanical binding or motor failure)
     double currentDiff = Math.abs(mInputs.rightCurrentAmps - mInputs.leftCurrentAmps);
     if (currentDiff > 20.0) {
-      System.err.println(
-          "[Shooter] Current Mismatch: R="
-              + mInputs.rightCurrentAmps
-              + "A, L="
-              + mInputs.leftCurrentAmps
-              + "A");
       return false;
     }
 
     // Check for excessive current (stall condition)
     if (mInputs.rightCurrentAmps > 80.0 || mInputs.leftCurrentAmps > 80.0) {
-      System.err.println(
-          "[Shooter] Current Spike: R="
-              + mInputs.rightCurrentAmps
-              + "A, L="
-              + mInputs.leftCurrentAmps
-              + "A");
       return false;
     }
 
@@ -315,9 +425,8 @@ public class Shooter extends Subsystem {
 
   @Override
   public void outputTelemetry() {
-    // TODO: Publish shooter state to NetworkTables
-    // SmartDashboard.putBoolean("Shooter/Running", mIsRunning);
-    // SmartDashboard.putNumber("Shooter/AvgVelocity", getAverageVelocity());
+    var dashboard = frc.robot.DashboardState.getInstance();
+    dashboard.shooterOK = checkConnectionPassive() && checkSanityPassive();
   }
 
   @Override

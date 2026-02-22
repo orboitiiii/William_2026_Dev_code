@@ -41,6 +41,18 @@ public interface DriveIO {
     /** Linear acceleration in m/s² [x, y, z] from the IMU. */
     public double[] accelMetersPerSec2 = new double[3];
 
+    /** Gyroscope pitch rate in radians per second (tilt forward/back). */
+    public double gyroPitchVelocityRadPerSec;
+
+    /** Gyroscope roll rate in radians per second (tilt left/right). */
+    public double gyroRollVelocityRadPerSec;
+
+    /** Gyroscope pitch angle in radians (tilt forward/back). */
+    public double gyroPitchRad;
+
+    /** Gyroscope roll angle in radians (tilt left/right). */
+    public double gyroRollRad;
+
     /** Drive motor position in rotor rotations (after gear ratio). */
     public double[] drivePositionRotations = new double[4];
 

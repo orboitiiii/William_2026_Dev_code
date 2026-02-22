@@ -103,7 +103,8 @@ public class SwerveSetpointGenerator {
     }
 
     // Apply feasibility limiting at the ChassisSpeeds level.
-    // This scales down the entire acceleration vector (including omega) if any module
+    // This scales down the entire acceleration vector (including omega) if any
+    // module
     // would exceed its physical friction/torque limit.
     ChassisSpeeds feasibleSpeeds =
         enforceFeasibility(desiredSpeeds, Constants.kLooperDt, mFilteredVoltages);
@@ -111,9 +112,20 @@ public class SwerveSetpointGenerator {
     // Convert feasible chassis speeds to module states
     SwerveModuleState[] feasibleStates = mKinematics.toSwerveModuleStates(feasibleSpeeds);
 
+    // Speed lock threshold: If speed is microscopic, preserve the last module angle
+    // to prevent twitching between directions due to noise vs absolute zero.
+    boolean isStationary =
+        Math.abs(feasibleSpeeds.vxMetersPerSecond) < 0.01
+            && Math.abs(feasibleSpeeds.vyMetersPerSecond) < 0.01
+            && Math.abs(feasibleSpeeds.omegaRadiansPerSecond) < 0.01;
+
     // Optimize wheel directions to minimize rotation.
     // Use previous setpoint angle as reference to ensure continuity.
     for (int i = 0; i < 4; i++) {
+      if (isStationary) {
+        feasibleStates[i].speedMetersPerSecond = 0.0;
+        feasibleStates[i].angle = mPrevSetpoint[i].angle;
+      }
       feasibleStates[i] = optimize(feasibleStates[i], mPrevSetpoint[i].angle);
     }
 
@@ -158,7 +170,8 @@ public class SwerveSetpointGenerator {
     // Convert desired speeds to module states to analyze per-module requirements
     SwerveModuleState[] idealStates = mKinematics.toSwerveModuleStates(desiredSpeeds);
 
-    // Optimize wheel directions using previous angles (for consistent acceleration calculation)
+    // Optimize wheel directions using previous angles (for consistent acceleration
+    // calculation)
     for (int i = 0; i < 4; i++) {
       idealStates[i] = optimize(idealStates[i], mPrevSetpoint[i].angle);
     }

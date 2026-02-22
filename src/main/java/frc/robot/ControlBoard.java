@@ -86,32 +86,15 @@ public class ControlBoard {
    * @return Normalized rotation command.
    */
   public double getRotation() {
-    // Controller: L2 (Left Trigger) = Turn Left (CCW, +)
-    // Controller: R2 (Right Trigger) = Turn Right (CW, -)
+    double leftInput = mController.getL2Axis();
+    double rightInput = mController.getR2Axis();
 
-    // FIX: Manually normalize inputs.
-    // Windows Driver often returns -1.0 (unpressed) to 1.0 (pressed).
-    // We convert this to 0.0 (unpressed) to 1.0 (pressed).
-    double leftRaw = mController.getL2Axis();
-    double rightRaw = mController.getR2Axis();
-
-    double leftVal = (leftRaw + 1.0) / 2.0;
-    double rightVal = (rightRaw + 1.0) / 2.0;
-
-    // Safety Clamp: Ensure normalization didn't go out of bounds (e.g. if driver
-    // was 0..1)
-    leftVal = MathUtil.clamp(leftVal, 0.0, 1.0);
-    rightVal = MathUtil.clamp(rightVal, 0.0, 1.0);
-
-    // Net rotation = Left - Right
-    // Example: Only Left pressed (1.0) -> 1.0 - 0.0 = +1.0 (Full CCW)
-    double rot = (rightVal - leftVal) * 0.80;
-
+    double rot = (leftInput - rightInput);
     rot = MathUtil.applyDeadband(rot, kDeadband);
+
     rot = Math.copySign(rot * rot, rot);
 
-    // Final Safety Clamp
-    rot = MathUtil.clamp(rot, -1.0, 1.0);
+    rot = rot * 0.60;
 
     return rot;
   }
@@ -161,7 +144,7 @@ public class ControlBoard {
    * <p>Used to toggle Intake operation. Edge-detected to prevent repeated triggers while button is
    * held.
    *
-   * @return True on R1 button press (rising edge only).
+   * @return True on Circle button press (rising edge only).
    */
   public boolean getIntakeToggle() {
     return mController.getCircleButtonPressed();
@@ -205,6 +188,14 @@ public class ControlBoard {
    */
   public boolean getIndexerButton() {
     return mController.getSquareButton();
+  }
+
+  public boolean getSideRollerButton() {
+    return mController.getL1Button();
+  }
+
+  public boolean getStraightRollerButton() {
+    return mController.getR1Button();
   }
 
   // --- Shooter Controls ---
@@ -264,49 +255,77 @@ public class ControlBoard {
     return mController.getOptionsButtonPressed();
   }
 
-  // --- SysId Controls (Test Mode) ---
+  public boolean getScoreFuelButton() {
+    return mController.getR1Button();
+  }
 
-  /**
-   * Returns true while Triangle button is held.
-   *
-   * <p>Used in Test Mode for Quasistatic Forward SysId test.
-   *
-   * @return True while Triangle is held.
-   */
+  public boolean getPassButton() {
+    return mController.getTriangleButton();
+  }
+
+  public boolean getClimbButton() {
+    return mController.getOptionsButton();
+  }
+
+  public boolean getCalibrationModeButton() {
+    return mController.getCreateButton();
+  }
+
+  public boolean getIntakeButton() {
+    return mController.getCircleButton();
+  }
+
   public boolean getSysIdQuasistaticForward() {
     return mController.getTriangleButton();
   }
 
-  /**
-   * Returns true while Circle button is held.
-   *
-   * <p>Used in Test Mode for Quasistatic Reverse SysId test.
-   *
-   * @return True while Circle is held.
-   */
   public boolean getSysIdQuasistaticReverse() {
     return mController.getCircleButton();
   }
 
-  /**
-   * Returns true while Square button is held.
-   *
-   * <p>Used in Test Mode for Dynamic Forward SysId test.
-   *
-   * @return True while Square is held.
-   */
   public boolean getSysIdDynamicForward() {
     return mController.getSquareButton();
   }
 
-  /**
-   * Returns true while Cross button is held.
-   *
-   * <p>Used in Test Mode for Dynamic Reverse SysId test.
-   *
-   * @return True while Cross is held.
-   */
   public boolean getSysIdDynamicReverse() {
     return mController.getCrossButton();
+  }
+
+  // --- Convenience Button Accessors (for Test Mode SysId) ---
+
+  public boolean getTriangleButton() {
+    return mController.getTriangleButton();
+  }
+
+  public boolean getSquareButton() {
+    return mController.getSquareButton();
+  }
+
+  public boolean getSquareButtonPressed() {
+    return mController.getSquareButtonPressed();
+  }
+
+  public boolean getCircleButtonPressed() {
+    return mController.getCircleButtonPressed();
+  }
+
+  public boolean getCrossButton() {
+    return mController.getCrossButton();
+  }
+
+  public boolean getCircleButton() {
+    return mController.getCircleButton();
+  }
+
+  public boolean getR1Button() {
+    return mController.getR1Button();
+  }
+
+  public boolean getL1Button() {
+    return mController.getL1Button();
+  }
+
+  public boolean getR1ButtonPressed() {
+    return mController.getR1ButtonPressed();
   }
 }

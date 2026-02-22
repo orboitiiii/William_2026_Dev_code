@@ -4,6 +4,7 @@ import com.ctre.phoenix6.BaseStatusSignal;
 import com.ctre.phoenix6.StatusSignal;
 import com.ctre.phoenix6.configs.TalonFXConfiguration;
 import com.ctre.phoenix6.controls.Follower;
+import com.ctre.phoenix6.controls.VelocityVoltage;
 import com.ctre.phoenix6.controls.VoltageOut;
 import com.ctre.phoenix6.hardware.TalonFX;
 import com.ctre.phoenix6.signals.InvertedValue;
@@ -13,6 +14,7 @@ import edu.wpi.first.units.measure.Angle;
 import edu.wpi.first.units.measure.AngularVelocity;
 import edu.wpi.first.units.measure.Current;
 import edu.wpi.first.units.measure.Voltage;
+import edu.wpi.first.wpilibj.Timer;
 import frc.robot.Constants;
 
 /**
@@ -58,6 +60,7 @@ public class ShooterIOReal implements ShooterIO {
 
   // --- Control Request Objects (reused to avoid allocation) ---
   private final VoltageOut mVoltageOut = new VoltageOut(0);
+  private final VelocityVoltage mVelocityVoltage = new VelocityVoltage(0);
   private final Follower mFollower;
 
   /**
@@ -67,8 +70,8 @@ public class ShooterIOReal implements ShooterIO {
    * synchronized dual-flywheel operation where flywheels spin inward.
    */
   public ShooterIOReal() {
-    mRightMotor = new TalonFX(Constants.Shooter.kRightMotorId);
-    mLeftMotor = new TalonFX(Constants.Shooter.kLeftMotorId);
+    mRightMotor = new TalonFX(Constants.Shooter.kRightMotorId, Constants.kCANBusName);
+    mLeftMotor = new TalonFX(Constants.Shooter.kLeftMotorId, Constants.kCANBusName);
 
     // --- Right Motor (Leader) Configuration ---
     var rightConfig = new TalonFXConfiguration();
@@ -84,7 +87,16 @@ public class ShooterIOReal implements ShooterIO {
     rightConfig.CurrentLimits.StatorCurrentLimitEnable =
         Constants.Shooter.kStatorCurrentLimitEnable;
 
-    mRightMotor.getConfigurator().apply(rightConfig);
+    // Slot 0 - Velocity Control
+    rightConfig.Slot0.kP = Constants.Shooter.kP;
+    rightConfig.Slot0.kS = Constants.Shooter.kS;
+    rightConfig.Slot0.kV = Constants.Shooter.kV;
+    rightConfig.Slot0.kA = Constants.Shooter.kA;
+
+    boolean rightOk =
+        frc.robot.util.Phoenix6Util.checkManeuver(
+            () -> mRightMotor.getConfigurator().apply(rightConfig), "Shooter Right Motor Config");
+    Timer.delay(0.1);
 
     // --- Left Motor (Follower) Configuration ---
     var leftConfig = new TalonFXConfiguration();
@@ -99,7 +111,9 @@ public class ShooterIOReal implements ShooterIO {
     leftConfig.CurrentLimits.StatorCurrentLimit = Constants.Shooter.kStatorCurrentLimit;
     leftConfig.CurrentLimits.StatorCurrentLimitEnable = Constants.Shooter.kStatorCurrentLimitEnable;
 
-    mLeftMotor.getConfigurator().apply(leftConfig);
+    boolean leftOk =
+        frc.robot.util.Phoenix6Util.checkManeuver(
+            () -> mLeftMotor.getConfigurator().apply(leftConfig), "Shooter Left Motor Config");
 
     // --- Follower Control: Left follows Right, Opposed = true ---
     // Opposed alignment ensures +V on Leader becomes -V on Follower.
@@ -117,19 +131,33 @@ public class ShooterIOReal implements ShooterIO {
     mLeftAppliedVolts = mLeftMotor.getMotorVoltage();
     mLeftCurrent = mLeftMotor.getSupplyCurrent();
 
-    mAllSignals =
-        new BaseStatusSignal[] {
-          mRightPosition,
-          mRightVelocity,
-          mRightAppliedVolts,
-          mRightCurrent,
-          mLeftVelocity,
-          mLeftAppliedVolts,
-          mLeftCurrent
-        };
+    // FAIL-SAFE: Only register signals if configuration succeeded
+    if (rightOk && leftOk) {
+      mAllSignals =
+          new BaseStatusSignal[] {
+            mRightPosition,
+            mRightVelocity,
+            mRightAppliedVolts,
+            mRightCurrent,
+            mLeftVelocity,
+            mLeftAppliedVolts,
+            mLeftCurrent
+          };
 
-    // Configure 50Hz update rate
-    BaseStatusSignal.setUpdateFrequencyForAll(50.0, mAllSignals);
+      // Configure 50Hz update rate
+      BaseStatusSignal.setUpdateFrequencyForAll(50.0, mAllSignals);
+
+      // Minimize CAN bus usage by disabling unused status frames
+      mRightMotor.optimizeBusUtilization();
+      mLeftMotor.optimizeBusUtilization();
+    } else {
+      System.err.println(
+          "CRITICAL: Shooter FAILED config - Excluding from synchronous updates to prevent Loop Overrun.");
+      mAllSignals = new BaseStatusSignal[0];
+    }
+
+    // PAUSE: Allow CAN buffer to drain
+    Timer.delay(0.05);
   }
 
   @Override
@@ -156,6 +184,12 @@ public class ShooterIOReal implements ShooterIO {
     // apply the same voltage magnitude but in the opposite direction (mirrored
     // spin).
     mRightMotor.setControl(mVoltageOut.withOutput(volts));
+  }
+
+  @Override
+  public void setTargetVelocity(double rotationsPerSec) {
+    // Use onboard closed-loop velocity control
+    mRightMotor.setControl(mVelocityVoltage.withVelocity(rotationsPerSec));
   }
 
   @Override

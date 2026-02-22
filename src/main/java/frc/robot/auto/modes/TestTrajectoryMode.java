@@ -34,31 +34,15 @@ public class TestTrajectoryMode extends AutoModeBase {
 
   @Override
   protected void routine() throws AutoModeEndedException {
-    System.out.println("[TestTrajectoryMode] Starting autonomous routine");
-
     try {
-      // Load trajectory from CSV
       Trajectory trajectory = TrajectoryReader.fromDeploy(mTrajectoryFileName);
-      System.out.println(
-          "[TestTrajectoryMode] Loaded trajectory: "
-              + mTrajectoryFileName
-              + ", duration: "
-              + trajectory.getTotalTimeSeconds()
-              + "s");
-
-      // Execute trajectory (reset odometry to start pose)
       runAction(new DriveTrajectoryAction(trajectory, true));
-
-      System.out.println("[TestTrajectoryMode] Trajectory completed!");
-
     } catch (IOException e) {
-      System.err.println("[TestTrajectoryMode] Failed to load trajectory: " + e.getMessage());
+      // Critical error: trajectory file not found — cannot recover
       e.printStackTrace();
     }
   }
 
   @Override
-  public void done() {
-    System.out.println("[TestTrajectoryMode] Autonomous routine finished");
-  }
+  public void done() {}
 }

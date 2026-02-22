@@ -57,6 +57,7 @@ public:
     int Solve(const double* current_state, 
               const double* linearized_matrices, 
               const double* ref_states, // [x0, y0, theta0, x1, y1...]
+              const double* ref_inputs, // [vx0, vy0, omega0, vx1...]
               double* output_u);
 
 private:
@@ -91,7 +92,7 @@ private:
 
     // Helper to build sparsity pattern once
     void BuildSparsityPattern();
-    void UpdateProblem(const double* x0, const double* lin_mats, const double* ref_states);
+    void UpdateProblem(const double* x0, const double* lin_mats, const double* ref_states, const double* ref_inputs);
 };
 
 } // namespace solvers

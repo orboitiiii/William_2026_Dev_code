@@ -875,6 +875,7 @@ JNIEXPORT jint JNICALL Java_frc_robot_libraries_lib9427_Team9427JNI_solveMPCNati
     jdoubleArray current_state_arr,
     jdoubleArray linearized_mats_arr,
     jdoubleArray ref_states_arr,
+    jdoubleArray ref_inputs_arr,
     jdoubleArray output_u_arr) {
 
     auto* mpc = reinterpret_cast<lib9427::solvers::MPCSolver*>(handle);
@@ -889,9 +890,10 @@ JNIEXPORT jint JNICALL Java_frc_robot_libraries_lib9427_Team9427JNI_solveMPCNati
     jdouble* c_state = env->GetDoubleArrayElements(current_state_arr, nullptr);
     jdouble* l_mats = env->GetDoubleArrayElements(linearized_mats_arr, nullptr);
     jdouble* r_states = env->GetDoubleArrayElements(ref_states_arr, nullptr);
+    jdouble* r_inputs = env->GetDoubleArrayElements(ref_inputs_arr, nullptr);
     jdouble* out_u = env->GetDoubleArrayElements(output_u_arr, nullptr);
 
-    int status = mpc->Solve(c_state, l_mats, r_states, out_u);
+    int status = mpc->Solve(c_state, l_mats, r_states, r_inputs, out_u);
 
     // Commit output changes
     env->ReleaseDoubleArrayElements(output_u_arr, out_u, 0); // 0 = copy back
@@ -900,6 +902,7 @@ JNIEXPORT jint JNICALL Java_frc_robot_libraries_lib9427_Team9427JNI_solveMPCNati
     env->ReleaseDoubleArrayElements(current_state_arr, c_state, JNI_ABORT);
     env->ReleaseDoubleArrayElements(linearized_mats_arr, l_mats, JNI_ABORT);
     env->ReleaseDoubleArrayElements(ref_states_arr, r_states, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(ref_inputs_arr, r_inputs, JNI_ABORT);
 
     return status;
 }

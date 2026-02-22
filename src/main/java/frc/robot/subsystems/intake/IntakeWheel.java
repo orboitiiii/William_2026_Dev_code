@@ -23,11 +23,6 @@ import frc.robot.framework.Subsystem;
 public class IntakeWheel extends Subsystem {
   private static IntakeWheel mInstance;
 
-  /**
-   * Returns the singleton instance.
-   *
-   * @return The global IntakeWheel instance.
-   */
   public static IntakeWheel getInstance() {
     if (mInstance == null) {
       mInstance = new IntakeWheel();
@@ -35,20 +30,23 @@ public class IntakeWheel extends Subsystem {
     return mInstance;
   }
 
+  public enum IntakeState {
+    IDLE,
+    RUNNING,
+    REVERSE
+  }
+
   private final IntakeWheelIO mIO;
   private final IntakeWheelIO.IntakeWheelIOInputs mInputs = new IntakeWheelIO.IntakeWheelIOInputs();
 
-  /**
-   * Toggle state: true = roller running, false = stopped.
-   *
-   * <p>Synchronized access required as state changes may originate from the main robot thread while
-   * the Looper reads state from a separate thread.
-   */
-  private boolean mIsRunning = false;
+  private IntakeState mState = IntakeState.IDLE;
 
   private IntakeWheel() {
-    // Use real IO implementation; swap to simulation IO if needed
-    mIO = new IntakeWheelIOReal();
+    if (Constants.kHasIntakeWheel) {
+      mIO = new IntakeWheelIOReal();
+    } else {
+      mIO = new IntakeWheelIO() {};
+    }
   }
 
   @Override
@@ -58,14 +56,12 @@ public class IntakeWheel extends Subsystem {
           @Override
           public void onStart(double timestamp) {
             synchronized (IntakeWheel.this) {
-              mIsRunning = false;
+              mState = IntakeState.IDLE;
             }
           }
 
           @Override
-          public void onLoop(double timestamp) {
-            // State machine logic runs here if needed
-          }
+          public void onLoop(double timestamp) {}
 
           @Override
           public void onStop(double timestamp) {
@@ -74,37 +70,70 @@ public class IntakeWheel extends Subsystem {
         });
   }
 
-  // --- Public API ---
-
-  /**
-   * Sets the running state of the intake roller.
-   *
-   * @param running True to run the roller, false to stop.
-   */
-  public synchronized void setRunning(boolean running) {
-    mIsRunning = running;
+  public synchronized void setWantedState(IntakeState state) {
+    mState = state;
   }
 
-  /**
-   * Toggles the intake roller state.
-   *
-   * <p>If currently running, stops the roller. If stopped, starts the roller.
-   */
   public synchronized void toggle() {
-    mIsRunning = !mIsRunning;
-    System.out.println("[IntakeWheel] Toggle -> " + (mIsRunning ? "RUNNING" : "STOPPED"));
+    if (mState == IntakeState.IDLE) {
+      mState = IntakeState.RUNNING;
+    } else {
+      mState = IntakeState.IDLE;
+    }
   }
 
-  /**
-   * Returns the current running state.
-   *
-   * @return True if the roller is running.
-   */
-  public synchronized boolean isRunning() {
-    return mIsRunning;
+  // ============================================================
+  // PER-STATE OPERATE METHODS (Orbit 1690 Pattern Decoupled)
+  // ============================================================
+  // The IntakeWheel state is now independently controlled via GlobalData toggles.
+
+  private void processWantedState() {
+    switch (frc.robot.GlobalData.intakeWheelWantedState) {
+      case FORWARD:
+        mState = IntakeState.RUNNING;
+        break;
+      case REVERSE:
+        // We will overload RUNNING specifically for reversed voltage below
+        // Or create a new REVERSE state if needed, but for simplicity,
+        // we'll add REVERSE to IntakeState
+        mState = IntakeState.REVERSE;
+        break;
+      case IDLE:
+      default:
+        mState = IntakeState.IDLE;
+        break;
+    }
   }
 
-  // --- Subsystem Interface ---
+  @Override
+  public void travelOperate() {
+    processWantedState();
+  }
+
+  @Override
+  public void intakeOperate() {
+    processWantedState();
+  }
+
+  @Override
+  public void scoreOperate() {
+    processWantedState();
+  }
+
+  @Override
+  public void passOperate() {
+    processWantedState();
+  }
+
+  @Override
+  public void climbOperate() {
+    processWantedState();
+  }
+
+  @Override
+  public void calibrateOperate() {
+    mState = IntakeState.IDLE; // Safety override
+  }
 
   @Override
   public void readPeriodicInputs() {
@@ -114,61 +143,70 @@ public class IntakeWheel extends Subsystem {
   @Override
   public void writePeriodicOutputs() {
     synchronized (this) {
-      if (mIsRunning) {
-        mIO.setVoltage(Constants.Intake.kIntakeVoltage);
-      } else {
-        mIO.stop();
+      switch (mState) {
+        case RUNNING:
+          mIO.setVoltage(Constants.Intake.kIntakeVoltage);
+          break;
+        case REVERSE:
+          mIO.setVoltage(-Constants.Intake.kIntakeVoltage);
+          break;
+        case IDLE:
+        default:
+          mIO.stop();
+          break;
       }
     }
   }
 
   @Override
   public boolean checkConnectionActive() {
-    // Active Query: Read Firmware Version from motor
-    System.out.println("[IntakeWheel] Running Active Connection Check...");
-
     int fw = mIO.getMotorFirmwareVersion();
-    if (fw == 0) {
-      System.err.println("[IntakeWheel] Motor Firmware Read Failed!");
-      return false;
-    } else {
-      System.out.println("[IntakeWheel] Motor FW: " + fw);
-      return true;
-    }
+    return fw != 0;
   }
 
   @Override
   public boolean checkConnectionPassive() {
-    // Passive: Check cached status from IO layer
     return mInputs.motorConnected;
   }
 
   @Override
   public boolean checkSanityPassive() {
-    // Check for current spike when running (stall detection)
-    if (mInputs.currentAmps > 40.0
-        || (mIsRunning && mInputs.velocityRotationsPerSec < 1 && mInputs.appliedVolts > 6)) {
-      System.err.println("[IntakeWheel] Current Spike (Stall): " + mInputs.currentAmps + "A");
+    // 1. Current spike check (hard stall)
+    if (mInputs.currentAmps > 80.0) {
       return false;
     }
+
+    // 2. Mechanical binding / jammed object check
+    // If the state is RUNNING or REVERSE, we are applying significant voltage
+    // but if velocity is extremely low, it indicates a jam.
+    if (mState == IntakeState.RUNNING || mState == IntakeState.REVERSE) {
+      if (Math.abs(mInputs.appliedVolts) > 6.0 && Math.abs(mInputs.velocityRotationsPerSec) < 1.0) {
+        return false;
+      }
+    }
+
     return true;
   }
 
   @Override
   public void outputTelemetry() {
-    // TODO: Publish intake state to NetworkTables if needed
+    frc.robot.DashboardState.getInstance().intakeWheelsOK =
+        checkConnectionPassive() && checkSanityPassive();
   }
 
   @Override
   public void stop() {
     synchronized (this) {
-      mIsRunning = false;
+      mState = IntakeState.IDLE;
     }
     mIO.stop();
   }
 
   @Override
-  public void zeroSensors() {
-    // No sensors to zero for this simple mechanism
+  public void zeroSensors() {}
+
+  /** Returns true if the intake wheels are actively spinning forward to ingest a game piece. */
+  public synchronized boolean isTakingIn() {
+    return mState == IntakeState.RUNNING;
   }
 }

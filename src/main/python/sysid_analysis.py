@@ -22,7 +22,7 @@ Q_VELOCITY = np.diag([1.0, 10.0])
 # We need moderate Velocity cost for Damping (to stop at the angle without oscillating out of the allowable zone).
 # We need high Integral cost to ensure we settle EXACTLY at the target (Precision).
 # Reduced R to allow more voltage usage (Aggressive).
-Q_POSITION = np.diag([500.0, 10.0, 200.0]) # Aggressive tuning
+Q_POSITION = np.diag([500.0, 10.0, 200.0])  # Aggressive tuning
 
 # R: Input Cost - Penalize [Voltage]
 # Lower values allows the controller to use more voltage to correct errors (Faster).
@@ -30,8 +30,9 @@ R_MATRIX = np.diag([4.0])
 
 # Data Settings
 DT = 0.02  # seconds (Standard FRC Period)
-SAVGOL_WINDOW = 11      # Window size for smoothing (must be odd)
-SAVGOL_POLY_ORDER = 3   # Polynomial order for smoothing
+SAVGOL_WINDOW = 11  # Window size for smoothing (must be odd)
+SAVGOL_POLY_ORDER = 3  # Polynomial order for smoothing
+
 
 def load_latest_csv(data_dir: str = "sysid_data") -> pd.DataFrame:
     """Loads the most recent sysid CSV file from the directory."""
@@ -41,6 +42,7 @@ def load_latest_csv(data_dir: str = "sysid_data") -> pd.DataFrame:
     latest_file = max(files, key=os.path.getctime)
     print(f"Loading data from: {latest_file}")
     return pd.read_csv(latest_file)
+
 
 def preprocess_data(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -67,6 +69,7 @@ def preprocess_data(df: pd.DataFrame) -> pd.DataFrame:
     # We will exclude very small velocities to avoid sign(0) noise if desired,
     # but for this script we keep it robust.
     return df
+
 
 def perform_ols_identification(df: pd.DataFrame) -> Tuple[float, float, float, float]:
     """
@@ -108,7 +111,10 @@ def perform_ols_identification(df: pd.DataFrame) -> Tuple[float, float, float, f
 
     return kS, kV, kA, r_squared
 
-def synthesize_lqr_controller(kV: float, kA: float) -> Tuple[np.ndarray, Tuple[float, float, float]]:
+
+def synthesize_lqr_controller(
+    kV: float, kA: float
+) -> Tuple[np.ndarray, Tuple[float, float, float]]:
     """
     Synthesizes a Discrete LQR Controller for the augmented system.
     System: x = [velocity], u = [voltage]
@@ -135,22 +141,26 @@ def synthesize_lqr_controller(kV: float, kA: float) -> Tuple[np.ndarray, Tuple[f
     # x_aug_dot = [ -kV/kA  0 ] * x_aug + [ 1/kA ] * u (+ [0; 1]*r)
     #             [  -1     0 ]           [   0  ]
 
-    A_c_aug = np.array([
-        [-kV/kA, 0.0],
-        [-1.0,   0.0]  # Integral of negative velocity (accumulates error r-v where r=0)
-    ])
+    A_c_aug = np.array(
+        [
+            [-kV / kA, 0.0],
+            [
+                -1.0,
+                0.0,
+            ],  # Integral of negative velocity (accumulates error r-v where r=0)
+        ]
+    )
 
-    B_c_aug = np.array([
-        [1.0 / kA],
-        [0.0]
-    ])
+    B_c_aug = np.array([[1.0 / kA], [0.0]])
 
     print(f"Continuous A Matrix:\n{A_c_aug}")
     print(f"Continuous B Matrix:\n{B_c_aug}")
 
     # 3. Discretize using Zero-Order Hold (ZOH)
     # returns (Ad, Bd, C, D, dt)
-    sys_d = scipy.signal.cont2discrete((A_c_aug, B_c_aug, None, None), dt=DT, method='zoh')
+    sys_d = scipy.signal.cont2discrete(
+        (A_c_aug, B_c_aug, None, None), dt=DT, method="zoh"
+    )
     A_d = sys_d[0]
     B_d = sys_d[1]
 
@@ -174,11 +184,14 @@ def synthesize_lqr_controller(kV: float, kA: float) -> Tuple[np.ndarray, Tuple[f
     # Engineering Note A: WPILib PIDController expects positive constants magnitude.
     kP = abs(K[0, 0])
     kI = abs(K[0, 1])
-    kD = 0.0 # LQR on this first-order system doesn't generate D term natively
+    kD = 0.0  # LQR on this first-order system doesn't generate D term natively
 
     return K, (kP, kI, kD)
 
-def synthesize_lqr_position_controller(kV: float, kA: float) -> Tuple[np.ndarray, Tuple[float, float, float]]:
+
+def synthesize_lqr_position_controller(
+    kV: float, kA: float
+) -> Tuple[np.ndarray, Tuple[float, float, float]]:
     """
     Synthesizes a Discrete LQR Controller for POSITION Control.
     System: x = [position, velocity]
@@ -196,22 +209,16 @@ def synthesize_lqr_position_controller(kV: float, kA: float) -> Tuple[np.ndarray
     # xi_dot = r - p (Integral of position error)
 
     # State: x = [p, v, xi]
-    A_c_aug = np.array([
-        [0.0, 1.0,        0.0],
-        [0.0, -kV/kA,     0.0],
-        [-1.0, 0.0,       0.0]
-    ])
+    A_c_aug = np.array([[0.0, 1.0, 0.0], [0.0, -kV / kA, 0.0], [-1.0, 0.0, 0.0]])
 
-    B_c_aug = np.array([
-        [0.0],
-        [1.0/kA],
-        [0.0]
-    ])
+    B_c_aug = np.array([[0.0], [1.0 / kA], [0.0]])
 
     print(f"Continuous A Matrix:\n{A_c_aug}")
 
     # Discretize
-    sys_d = scipy.signal.cont2discrete((A_c_aug, B_c_aug, None, None), dt=DT, method='zoh')
+    sys_d = scipy.signal.cont2discrete(
+        (A_c_aug, B_c_aug, None, None), dt=DT, method="zoh"
+    )
     A_d, B_d = sys_d[0], sys_d[1]
 
     # Solve DARE
@@ -229,13 +236,15 @@ def synthesize_lqr_position_controller(kV: float, kA: float) -> Tuple[np.ndarray
     # kD = K[0,1]
     # kI = K[0,2] (Note sign convention might be negative in matrix)
 
-    kP = abs(K[0,0])
-    kD = abs(K[0,1])
-    kI = abs(K[0,2])
+    kP = abs(K[0, 0])
+    kD = abs(K[0, 1])
+    kI = abs(K[0, 2])
 
     return K, (kP, kI, kD)
 
+
 import sys
+
 
 def main():
     # 1. Load
@@ -254,27 +263,20 @@ def main():
     df_processed = preprocess_data(df)
 
     # 3. OLS Identification
-    # kS, kV, kA, r2 = perform_ols_identification(df_processed)
-    # Forced Override using User's known good constants (from Java comments)
-    # kV=0.3918 V/(rad/s), kA=0.0001
-    print("--- Using Hardcoded Physical Constants (from previous valid SysId) ---")
-    kS = 0.1340
-    kV = 0.3918
-    kA = 0.0001
-    r2 = 1.0
+    kS, kV, kA, r2 = perform_ols_identification(df_processed)
 
-    print("--- System Identification Results (Overridden) ---")
+    print("--- System Identification Results ---")
     print(f"kS (Static Friction): {kS:.4f} Volts")
     print(f"kV (Velocity Gain):   {kV:.4f} Volts/(Unit/s)")
     print(f"kA (Accel Gain):      {kA:.4f} Volts/(Unit/s^2)")
-    # print(f"R^2 Score:            {r2:.4f}")
+    print(f"R^2 Score:            {r2:.4f}")
 
     if r2 < 0.9:
         print("WARNING: Low R^2 score. Check data quality or mechanism linearity.")
 
     # 4. LQR Synthesis
     # Detect mode based on filename (rough heuristic)
-    filename = "sysid_data" # default
+    filename = "sysid_data"  # default
     if len(sys.argv) > 1:
         filename = sys.argv[1]
 
@@ -288,7 +290,9 @@ def main():
     print(f"kI: {pid_gains[1]:.4f}")
     print(f"kD: {pid_gains[2]:.4f}")
     print("\nEngineering Note C: Remember to add Feedforward!")
-    print(f"V_applied = PID(error) + {kS:.4f} * sign(setpoint) + (Optional kV * setpoint_vel)")
+    print(
+        f"V_applied = PID(error) + {kS:.4f} * sign(setpoint) + (Optional kV * setpoint_vel)"
+    )
 
     # 5. Verification Plot
     # Predict V using identified model
@@ -297,8 +301,19 @@ def main():
     v_pred = kS * np.sign(v) + kV * v + kA * a
 
     plt.figure(figsize=(10, 6))
-    plt.plot(df_processed["Timestamp"], df_processed["Voltage"], label="Measured Voltage", alpha=0.7)
-    plt.plot(df_processed["Timestamp"], v_pred, label="OLS Predicted Voltage", linestyle="--", alpha=0.9)
+    plt.plot(
+        df_processed["Timestamp"],
+        df_processed["Voltage"],
+        label="Measured Voltage",
+        alpha=0.7,
+    )
+    plt.plot(
+        df_processed["Timestamp"],
+        v_pred,
+        label="OLS Predicted Voltage",
+        linestyle="--",
+        alpha=0.9,
+    )
     plt.xlabel("Time (s)")
     plt.ylabel("Voltage (V)")
     plt.title(f"SysId Fit Verification (R^2={r2:.3f})")
@@ -308,6 +323,7 @@ def main():
     # Save plot
     plt.savefig("sysid_fit_plot.png")
     print("\nVerification plot saved to 'sysid_fit_plot.png'")
+
 
 if __name__ == "__main__":
     main()

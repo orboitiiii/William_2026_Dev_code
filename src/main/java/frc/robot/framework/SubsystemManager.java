@@ -1,5 +1,7 @@
 package frc.robot.framework;
 
+import edu.wpi.first.wpilibj.smartdashboard.SendableChooser;
+import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -37,6 +39,14 @@ public class SubsystemManager implements ILoop {
 
   private final List<Subsystem> mAllSubsystems;
 
+  /**
+   * Dashboard chooser for selecting which subsystem to test in Test Mode.
+   *
+   * <p>"ALL" runs every subsystem's handleTestMode(); selecting a specific name gates the call to
+   * that subsystem only and stop()s the rest.
+   */
+  private final SendableChooser<String> mTestChooser = new SendableChooser<>();
+
   private SubsystemManager() {
     mAllSubsystems = new ArrayList<>();
   }
@@ -44,11 +54,6 @@ public class SubsystemManager implements ILoop {
   /** Calls {@code outputTelemetry()} on all subsystems. */
   public void outputTelemetry() {
     mAllSubsystems.forEach((s) -> s.outputTelemetry());
-  }
-
-  /** Calls {@code writeToLog()} on all subsystems. */
-  public void writeToLog() {
-    mAllSubsystems.forEach((s) -> s.writeToLog());
   }
 
   /** Stops all subsystems. */
@@ -77,6 +82,24 @@ public class SubsystemManager implements ILoop {
     for (Subsystem s : allSubsystems) {
       mAllSubsystems.add(s);
     }
+    buildTestChooser();
+  }
+
+  /**
+   * Populates the test-mode SendableChooser with all registered subsystem names.
+   *
+   * <p>Published to SmartDashboard under "Test/Subsystem". The default option "ALL" preserves
+   * backward-compatible behavior (all subsystems receive handleTestMode). Selecting a specific
+   * subsystem gates the call to that subsystem only.
+   */
+  private void buildTestChooser() {
+    // Pre-allocated at init — no allocation in periodic loops
+    mTestChooser.setDefaultOption("ALL", "ALL");
+    for (Subsystem s : mAllSubsystems) {
+      String name = s.getClass().getSimpleName();
+      mTestChooser.addOption(name, name);
+    }
+    SmartDashboard.putData("Test/Subsystem", mTestChooser);
   }
 
   /**
@@ -101,8 +124,50 @@ public class SubsystemManager implements ILoop {
   @Override
   public void onStart(double timestamp) {}
 
+  /** Calls {@code operate()} on all subsystems (state machine dispatch). */
+  public void operate() {
+    mAllSubsystems.forEach((s) -> s.operate());
+  }
+
+  /** Calls {@code handleTestMode()} on all subsystems. */
+  public void handleTestMode(frc.robot.ControlBoard control) {
+    mAllSubsystems.forEach((s) -> s.handleTestMode(control));
+  }
+
   @Override
-  public void onLoop(double timestamp) {}
+  public void onLoop(double timestamp) {
+    // 1. Read Inputs (50Hz)
+    for (Subsystem s : mAllSubsystems) {
+      s.readPeriodicInputs();
+    }
+
+    // 2. Operate - State Machine Dispatch (Orbit 1690 Pattern)
+    // Each subsystem reads GlobalData.robotState and acts accordingly
+    if (frc.robot.GlobalData.isTestMode) {
+      // Test mode: only the selected subsystem receives handleTestMode().
+      // Unselected subsystems are stop()-ed to prevent zombie outputs.
+      var control = frc.robot.ControlBoard.getInstance();
+      String selected = mTestChooser.getSelected();
+      SmartDashboard.putString("Test/Selected", selected == null ? "NULL" : selected);
+      boolean runAll = "ALL".equals(selected);
+      for (Subsystem s : mAllSubsystems) {
+        if (runAll || s.getClass().getSimpleName().equals(selected)) {
+          s.handleTestMode(control);
+        } else {
+          s.stop();
+        }
+      }
+    } else {
+      for (Subsystem s : mAllSubsystems) {
+        s.operate();
+      }
+    }
+
+    // 3. Write Outputs (50Hz)
+    for (Subsystem s : mAllSubsystems) {
+      s.writePeriodicOutputs();
+    }
+  }
 
   @Override
   public void onStop(double timestamp) {

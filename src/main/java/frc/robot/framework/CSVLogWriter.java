@@ -123,9 +123,6 @@ public class CSVLogWriter {
         writer.newLine();
       }
 
-      System.out.println(
-          "[CSVLogWriter] Successfully wrote " + data.size() + " rows to " + fullFileName);
-
     } catch (IOException e) {
       System.err.println("[CSVLogWriter] Error writing batch CSV: " + e.getMessage());
     }
@@ -141,9 +138,7 @@ public class CSVLogWriter {
     File[] files = dir.listFiles((d, name) -> name.startsWith("sysid_") && name.endsWith(".csv"));
     if (files != null) {
       for (File f : files) {
-        if (f.delete()) {
-          System.out.println("[CSVLogWriter] Deleted " + f.getName());
-        } else {
+        if (!f.delete()) {
           System.err.println("[CSVLogWriter] Failed to delete " + f.getName());
         }
       }

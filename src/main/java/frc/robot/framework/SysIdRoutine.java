@@ -219,9 +219,6 @@ public class SysIdRoutine {
     mStartTime = Timer.getFPGATimestamp();
     mOutputVoltage = 0.0;
     mDataBuffer.clear();
-
-    System.out.println(
-        "[SysId] Started " + type + " " + direction + " for " + mConfig.subsystemName);
   }
 
   /**
@@ -285,12 +282,6 @@ public class SysIdRoutine {
 
     mIsActive = false;
     mOutputVoltage = 0.0;
-    System.out.println(
-        "[SysId] Stopping "
-            + mConfig.subsystemName
-            + "... Saving "
-            + mDataBuffer.size()
-            + " points.");
 
     flushToDisk();
   }

@@ -90,11 +90,6 @@ public class TrajectoryFollower {
     mXController.reset();
     mYController.reset();
     mThetaController.reset();
-
-    System.out.println(
-        "[TrajectoryFollower] Starting trajectory, duration: "
-            + trajectory.getTotalTimeSeconds()
-            + "s");
   }
 
   /** Stops trajectory following. */
@@ -119,13 +114,14 @@ public class TrajectoryFollower {
     // Compute elapsed time
     double elapsedTime = Timer.getFPGATimestamp() - mStartTimeSeconds;
 
-    // Check for trajectory completion
-    // Check for trajectory completion
-    // With lookahead, we might finish slightly early if strict time check is used.
-    // However, we still want to drive until the end.
-    if (elapsedTime > mCurrentTrajectory.getTotalTimeSeconds()) {
+    // --- Settle Logic ---
+    // If we have exceeded the trajectory time, keep using the terminal pose
+    // for an extra 0.5s to allow PID to stabilize.
+    double totalTime = mCurrentTrajectory.getTotalTimeSeconds();
+    double settleTime = 0.5; // seconds
+
+    if (elapsedTime > totalTime + settleTime) {
       mIsFinished = true;
-      System.out.println("[TrajectoryFollower] Trajectory completed");
       return new ChassisSpeeds();
     }
 
@@ -156,7 +152,7 @@ public class TrajectoryFollower {
     return new ChassisSpeeds(
         feedforward.vxMetersPerSecond + xFeedback,
         feedforward.vyMetersPerSecond + yFeedback,
-        -feedforward.omegaRadiansPerSecond - thetaFeedback);
+        feedforward.omegaRadiansPerSecond + thetaFeedback);
   }
 
   /**
@@ -174,8 +170,10 @@ public class TrajectoryFollower {
     }
 
     double elapsedTime = timestampSeconds - mStartTimeSeconds;
+    double totalTime = mCurrentTrajectory.getTotalTimeSeconds();
+    double settleTime = 0.5;
 
-    if (mCurrentTrajectory.isFinished(elapsedTime)) {
+    if (elapsedTime > totalTime + settleTime) {
       mIsFinished = true;
       return new ChassisSpeeds();
     }
@@ -215,6 +213,15 @@ public class TrajectoryFollower {
       return 0;
     }
     return Timer.getFPGATimestamp() - mStartTimeSeconds;
+  }
+
+  /**
+   * Returns the start time of the trajectory.
+   *
+   * @return Start time in FPGA seconds.
+   */
+  public double getStartTimeSeconds() {
+    return mStartTimeSeconds;
   }
 
   /**

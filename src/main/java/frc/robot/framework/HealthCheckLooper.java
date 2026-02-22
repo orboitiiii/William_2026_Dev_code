@@ -53,16 +53,10 @@ public class HealthCheckLooper {
         return;
       }
 
-      System.out.println("[HealthCheck] Running Active Connection Checks...");
       for (Subsystem s : SubsystemManager.getInstance().getSubsystems()) {
-        boolean result = s.checkConnectionActive();
-        if (!result) {
-          System.err.println(
-              "[HealthCheck] Active check failed for: " + s.getClass().getSimpleName());
-        }
+        s.checkConnectionActive();
       }
       mActiveCheckCompleted = true;
-      System.out.println("[HealthCheck] Active Connection Checks Complete.");
     }
   }
 
@@ -74,7 +68,6 @@ public class HealthCheckLooper {
   public void start() {
     synchronized (mLock) {
       if (!mRunning) {
-        System.out.println("[HealthCheck] Starting 1Hz Passive Checks...");
         mRunning = true;
         mNotifier.startPeriodic(kPeriod);
       }
@@ -85,7 +78,6 @@ public class HealthCheckLooper {
   public void stop() {
     synchronized (mLock) {
       if (mRunning) {
-        System.out.println("[HealthCheck] Stopping Passive Checks.");
         mNotifier.stop();
         mRunning = false;
       }
@@ -97,14 +89,41 @@ public class HealthCheckLooper {
     frc.robot.DashboardState dashboard = frc.robot.DashboardState.getInstance();
 
     // Drive Subsystem Check
-    frc.robot.subsystems.drive.Drive drive = frc.robot.subsystems.drive.Drive.getInstance();
-    boolean driveOk = drive.checkConnectionPassive() && drive.checkSanityPassive();
-    dashboard.driveHealth = driveOk ? (byte) 1 : (byte) 0;
+    var drive = frc.robot.subsystems.drive.Drive.getInstance();
+    dashboard.driveOK = drive.checkConnectionPassive() && drive.checkSanityPassive();
 
-    // IntakeWheel Subsystem Check
-    frc.robot.subsystems.intake.IntakeWheel intake =
-        frc.robot.subsystems.intake.IntakeWheel.getInstance();
-    boolean intakeOk = intake.checkConnectionPassive() && intake.checkSanityPassive();
-    dashboard.intakeHealth = intakeOk ? (byte) 1 : (byte) 0;
+    // Turret Subsystem Check
+    if (frc.robot.Constants.kHasTurret) {
+      var turret = frc.robot.subsystems.turret.Turret.getInstance();
+      dashboard.turretOK = turret.checkConnectionPassive() && turret.checkSanityPassive();
+    }
+
+    // Hood Subsystem Check
+    if (frc.robot.Constants.kHasHood) {
+      var hood = frc.robot.subsystems.hood.Hood.getInstance();
+      dashboard.hoodOK = hood.checkConnectionPassive() && hood.checkSanityPassive();
+    }
+
+    // Shooter Subsystem Check
+    var shooter = frc.robot.subsystems.shooter.Shooter.getInstance();
+    dashboard.shooterOK = shooter.checkConnectionPassive() && shooter.checkSanityPassive();
+
+    // Intake Wheels Subsystem Check
+    var intakeWheel = frc.robot.subsystems.intake.IntakeWheel.getInstance();
+    dashboard.intakeWheelsOK =
+        intakeWheel.checkConnectionPassive() && intakeWheel.checkSanityPassive();
+
+    // Intake Pivot Subsystem Check
+    var intakePivot = frc.robot.subsystems.intake.IntakePivot.getInstance();
+    dashboard.intakePivotOK =
+        intakePivot.checkConnectionPassive() && intakePivot.checkSanityPassive();
+
+    // Indexer Subsystem Check
+    var indexer = frc.robot.subsystems.indexer.Indexer.getInstance();
+    dashboard.indexerOK = indexer.checkConnectionPassive() && indexer.checkSanityPassive();
+
+    // Vision Subsystem Check (Front Limelight)
+    var vision = frc.robot.subsystems.vision.VisionSubsystem.getInstance();
+    dashboard.frontLLOK = vision.checkConnectionPassive() && vision.checkSanityPassive();
   }
 }
