@@ -78,8 +78,11 @@ public class IndexerIOReal implements IndexerIO {
         Constants.Indexer.kSideRollerInverted
             ? InvertedValue.Clockwise_Positive
             : InvertedValue.CounterClockwise_Positive;
+    sideConfig.Feedback.SensorToMechanismRatio = Constants.Indexer.kSideRollerGearRatio;
     sideConfig.CurrentLimits.SupplyCurrentLimit = Constants.Indexer.kSupplyCurrentLimit;
     sideConfig.CurrentLimits.SupplyCurrentLimitEnable = Constants.Indexer.kSupplyCurrentLimitEnable;
+    sideConfig.CurrentLimits.StatorCurrentLimit = Constants.Indexer.kStatorCurrentLimit;
+    sideConfig.CurrentLimits.StatorCurrentLimitEnable = Constants.Indexer.kStatorCurrentLimitEnable;
     // Slot 0 Gains
     sideConfig.Slot0.kP = Constants.Indexer.kSidekP;
     sideConfig.Slot0.kI = 0.0;
@@ -104,6 +107,9 @@ public class IndexerIOReal implements IndexerIO {
     straightConfig.CurrentLimits.SupplyCurrentLimit = Constants.Indexer.kSupplyCurrentLimit;
     straightConfig.CurrentLimits.SupplyCurrentLimitEnable =
         Constants.Indexer.kSupplyCurrentLimitEnable;
+    straightConfig.CurrentLimits.StatorCurrentLimit = Constants.Indexer.kStatorCurrentLimit;
+    straightConfig.CurrentLimits.StatorCurrentLimitEnable =
+        Constants.Indexer.kStatorCurrentLimitEnable;
     // Slot 0 Gains
     straightConfig.Slot0.kP = Constants.Indexer.kStraightkP;
     straightConfig.Slot0.kI = 0.0;
@@ -129,31 +135,27 @@ public class IndexerIOReal implements IndexerIO {
     mStraightRollerAppliedVolts = mStraightRollerMotor.getMotorVoltage();
     mStraightRollerCurrent = mStraightRollerMotor.getSupplyCurrent();
 
-    // FAIL-SAFE: Only register signals if configuration succeeded
-    // If config failed, the device is likely dead/disconnected, so we shouldn't
-    // block on it.
-    if (sideOk && straightOk) {
-      mAllSignals =
-          new BaseStatusSignal[] {
-            mSideRollerPosition,
-            mSideRollerVelocity,
-            mSideRollerAppliedVolts,
-            mSideRollerCurrent,
-            mStraightRollerPosition,
-            mStraightRollerVelocity,
-            mStraightRollerAppliedVolts,
-            mStraightRollerCurrent
-          };
-      // Configure 50Hz update rate
-      BaseStatusSignal.setUpdateFrequencyForAll(50.0, mAllSignals);
+    mAllSignals =
+        new BaseStatusSignal[] {
+          mSideRollerPosition,
+          mSideRollerVelocity,
+          mSideRollerAppliedVolts,
+          mSideRollerCurrent,
+          mStraightRollerPosition,
+          mStraightRollerVelocity,
+          mStraightRollerAppliedVolts,
+          mStraightRollerCurrent
+        };
+    // Configure 50Hz update rate
+    BaseStatusSignal.setUpdateFrequencyForAll(50.0, mAllSignals);
 
-      // Minimize CAN bus usage by disabling unused status frames
-      mSideRollerMotor.optimizeBusUtilization();
-      mStraightRollerMotor.optimizeBusUtilization();
-    } else {
+    // Minimize CAN bus usage by disabling unused status frames
+    mSideRollerMotor.optimizeBusUtilization();
+    mStraightRollerMotor.optimizeBusUtilization();
+
+    if (!sideOk || !straightOk) {
       System.err.println(
-          "CRITICAL: Indexer FAILED config - Excluding from synchronous updates to prevent Loop Overrun.");
-      mAllSignals = new BaseStatusSignal[0];
+          "CRITICAL: Indexer FAILED config. Will still poll its status but it may be unresponsive.");
     }
 
     // PAUSE: Allow CAN buffer to drain

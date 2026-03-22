@@ -176,8 +176,8 @@ public class SwerveSetpointGenerator {
       idealStates[i] = optimize(idealStates[i], mPrevSetpoint[i].angle);
     }
 
-    // Physical Friction Limit
-    double limitFriction = Constants.Swerve.kMaxDriveAcceleration; // μ * g
+    double limitFriction =
+        Constants.Swerve.kMaxDriveAcceleration * Constants.Swerve.kAccelerationSafetyFactor;
 
     // Calculate required and allowed accelerations for each module
     double[] linearAccelerations = new double[4];

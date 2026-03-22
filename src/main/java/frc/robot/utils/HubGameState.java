@@ -84,6 +84,48 @@ public class HubGameState {
   }
 
   /**
+   * Returns true when match time is unavailable (practice / bench testing). WPILib returns -1.0
+   * from {@code DriverStation.getMatchTime()} when the FMS is not connected and no practice timer
+   * is running.
+   */
+  public static boolean isPracticeMode() {
+    return DriverStation.getMatchTime() < 0;
+  }
+
+  /**
+   * When the Hub is currently <em>inactive</em>, returns the remaining seconds until it becomes
+   * active again (i.e. the remainder of the current inactive shift).
+   *
+   * @return 0.0 if the Hub is already active; otherwise the seconds until the next active shift.
+   */
+  public static double getTimeUntilHubActive() {
+    if (isHubActive()) {
+      return 0.0;
+    }
+    if (!DriverStation.isTeleopEnabled()) {
+      return Double.MAX_VALUE;
+    }
+    double matchTime = DriverStation.getMatchTime();
+    if (matchTime < 0) {
+      return 0.0;
+    }
+
+    if (matchTime > 130) {
+      return 0.0; // transition period, hub always active — shouldn't reach here
+    } else if (matchTime > 105) {
+      return matchTime - 105.0;
+    } else if (matchTime > 80) {
+      return matchTime - 80.0;
+    } else if (matchTime > 55) {
+      return matchTime - 55.0;
+    } else if (matchTime > 30) {
+      return matchTime - 30.0;
+    } else {
+      return 0.0; // endgame, hub always active
+    }
+  }
+
+  /**
    * Returns the remaining time in seconds that the Hub is expected to be in its CURRENT active
    * state.
    *

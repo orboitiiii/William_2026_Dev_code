@@ -208,7 +208,10 @@ public class IntakePivot extends Subsystem {
 
   @Override
   public void climbOperate() {
-    processWantedState();
+    // Force pivot stowed during climb — do NOT follow driver toggle.
+    // Leaving the arm extended while suspended risks mechanical damage.
+    mState = PivotState.STOWED;
+    mIsClosedLoop = true;
   }
 
   @Override
@@ -443,6 +446,6 @@ public class IntakePivot extends Subsystem {
 
   @Override
   public void zeroSensors() {
-    mIO.resetPosition(Rotation2d.fromDegrees(Constants.IntakePivot.kMinAngle));
+    mIO.resetPosition(Rotation2d.fromDegrees(Constants.IntakePivot.kMaxAngle));
   }
 }

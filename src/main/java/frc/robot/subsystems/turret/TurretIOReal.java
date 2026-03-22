@@ -45,11 +45,7 @@ public class TurretIOReal implements TurretIO {
 
   // --- Control Request Objects (reused to avoid allocation) ---
   private final PositionVoltage mPositionControl = new PositionVoltage(0);
-  private final com.ctre.phoenix6.controls.MotionMagicVoltage mMotionMagicControl =
-      new com.ctre.phoenix6.controls.MotionMagicVoltage(0);
-  private final VoltageOut mVoltageOut = new VoltageOut(0);
-
-  private boolean mIsUsingMotionMagic = false;
+  private final VoltageOut mVoltageControl = new VoltageOut(0);
 
   // --- CRT Absolute Positioning CANcoders ---
   private final CANcoder mMotorEncoder;
@@ -70,7 +66,7 @@ public class TurretIOReal implements TurretIO {
     config.Slot0.kP = Constants.Turret.kP;
     config.Slot0.kI = Constants.Turret.kI;
     config.Slot0.kD = Constants.Turret.kD;
-    config.Slot0.kS = Constants.Turret.kS;
+    config.Slot0.kS = Constants.Turret.kS; // 恢復硬體級 kS，馬達內部處理更平滑
     config.Slot0.kV = Constants.Turret.kV;
     config.Slot0.kA = Constants.Turret.kA;
 
@@ -80,15 +76,12 @@ public class TurretIOReal implements TurretIO {
     config.CurrentLimits.StatorCurrentLimit = Constants.Turret.kStatorCurrentLimit;
     config.CurrentLimits.StatorCurrentLimitEnable = true;
 
-    // Motion Magic Configuration
-    config.MotionMagic.MotionMagicCruiseVelocity =
-        Constants.Turret.kMaxVelocityRadPerSec / (2.0 * Math.PI);
-    config.MotionMagic.MotionMagicAcceleration =
-        Constants.Turret.kMaxAccelerationRadPerSecSq / (2.0 * Math.PI);
+    // Removed Motion Magic config: We utilize RIO-side TrapezoidProfile with
+    // PositionVoltage,
+    // so internal profile generator bounds are dead code and may cause confusion.
 
     // Gear ratio for accurate position reporting (motor rotations -> turret
     // radians)
-    // SensorToMechanismRatio: motor rotations / mechanism rotations
     config.Feedback.SensorToMechanismRatio = Constants.Turret.kGearRatio;
 
     // Soft limits (in rotations)
@@ -109,22 +102,21 @@ public class TurretIOReal implements TurretIO {
     mAppliedVolts = mMotor.getMotorVoltage();
     mCurrent = mMotor.getSupplyCurrent();
 
-    if (isConfigValid) {
-      mAllSignals = new BaseStatusSignal[] {mPosition, mVelocity, mAppliedVolts, mCurrent};
+    mAllSignals = new BaseStatusSignal[] {mPosition, mVelocity, mAppliedVolts, mCurrent};
 
-      // Configure 50Hz update rate
-      // Minimize CAN bus usage by disabling unused status frames
-      mMotor.optimizeBusUtilization();
+    // Configure 50Hz update rate
+    // Minimize CAN bus usage by disabling unused status frames
+    mMotor.optimizeBusUtilization();
 
-      // PAUSE: Allow CAN buffer to drain
-      Timer.delay(0.05);
+    // PAUSE: Allow CAN buffer to drain
+    Timer.delay(0.05);
 
-      // Configure 50Hz update rate
-      BaseStatusSignal.setUpdateFrequencyForAll(50.0, mAllSignals);
-    } else {
-      mAllSignals = new BaseStatusSignal[0];
+    // 降低砲塔回報頻率至 50Hz (20ms)
+    BaseStatusSignal.setUpdateFrequencyForAll(50.0, mAllSignals);
+
+    if (!isConfigValid) {
       System.err.println(
-          "CRITICAL: Turret FAILED config - Excluding from synchronous updates to prevent Loop Overrun.");
+          "CRITICAL: Turret FAILED config. Will still poll its status but it may be unresponsive.");
     }
 
     // --- CANcoder Init (for CRT absolute positioning) ---
@@ -133,7 +125,8 @@ public class TurretIOReal implements TurretIO {
 
     // Motor Shaft CANcoder Configuration
     var motorEncoderConfig = new CANcoderConfiguration();
-    motorEncoderConfig.MagnetSensor.MagnetOffset = Constants.Turret.kMotorEncoderOffsetRotations;
+    // 移除硬體的 MagnetOffset，讓 CRT 得以使用最純粹的原始分數進行同步，避免在 0度附近獨自溢位
+    motorEncoderConfig.MagnetSensor.MagnetOffset = 0.0;
     // Positive direction matches motor (Counter-Clockwise Positive from motor side)
     motorEncoderConfig.MagnetSensor.SensorDirection =
         SensorDirectionValue.CounterClockwise_Positive;
@@ -142,7 +135,8 @@ public class TurretIOReal implements TurretIO {
 
     // Auxiliary Shaft CANcoder Configuration
     var auxEncoderConfig = new CANcoderConfiguration();
-    auxEncoderConfig.MagnetSensor.MagnetOffset = Constants.Turret.kAuxEncoderOffsetRotations;
+    // 移除硬體的 MagnetOffset
+    auxEncoderConfig.MagnetSensor.MagnetOffset = 0.0;
     auxEncoderConfig.MagnetSensor.SensorDirection = SensorDirectionValue.CounterClockwise_Positive;
     frc.robot.util.Phoenix6Util.checkManeuver(
         () -> mAuxEncoder.getConfigurator().apply(auxEncoderConfig), "Aux CANcoder Config");
@@ -168,65 +162,33 @@ public class TurretIOReal implements TurretIO {
 
     inputs.motorEncoderAbsPosRotations = mMotorEncoder.getAbsolutePosition().getValueAsDouble();
     inputs.auxEncoderAbsPosRotations = mAuxEncoder.getAbsolutePosition().getValueAsDouble();
+
+    inputs.motorEncoderRawRotations = mMotorEncoder.getPosition().getValueAsDouble();
+    inputs.auxEncoderRawRotations = mAuxEncoder.getPosition().getValueAsDouble();
   }
 
   @Override
   public void setPositionSetpoint(
       double positionRads, double velocityRadsPerSec, double feedforwardVolts) {
-    // Convert radians to rotations for Phoenix 6
+
     double targetRotations = positionRads / (2.0 * Math.PI);
-    double currentRotations = mPosition.getValueAsDouble();
-    double currentVelocityRotPerSec = mVelocity.getValueAsDouble();
+    double targetVelocityRotPerSec = velocityRadsPerSec / (2.0 * Math.PI);
 
-    // Calculate kS Feedforward (Static friction compensation)
-    double kS_FF = 0.0;
-    if (Math.abs(currentVelocityRotPerSec) > 1e-3) {
-      kS_FF = Constants.Turret.kS * Math.signum(currentVelocityRotPerSec);
-    }
-    double totalFeedforward = kS_FF + feedforwardVolts;
-
-    // Calculate absolute position error in rotations, properly handling phase
-    // wraparound
-    // Convert to radians to use WPILib angleModulus for [-pi, pi] shortest path,
-    // then back to rotations
-    double errorRads =
-        edu.wpi.first.math.MathUtil.angleModulus(
-            (targetRotations - currentRotations) * 2.0 * Math.PI);
-    double errorRotations = Math.abs(errorRads / (2.0 * Math.PI));
-
-    // Hysteresis Band (10.0 degrees upper, 5.0 degrees lower)
-    double upperThresholdRot = 10.0 / 360.0;
-    double lowerThresholdRot = 5.0 / 360.0;
-
-    if (errorRotations > upperThresholdRot && !mIsUsingMotionMagic) {
-      mIsUsingMotionMagic = true;
-    } else if (errorRotations < lowerThresholdRot && mIsUsingMotionMagic) {
-      mIsUsingMotionMagic = false;
-    }
-
-    if (mIsUsingMotionMagic) {
-      // State 1: Macro Movement (Smooth Trapezoidal Trajectory)
-      mMotor.setControl(
-          mMotionMagicControl.withPosition(targetRotations).withFeedForward(totalFeedforward));
-    } else {
-      // State 2: Micro Tracking (Responsive PID + Raw Voltage Feedforward for
-      // shoot-on-move)
-      mMotor.setControl(
-          mPositionControl
-              .withPosition(targetRotations)
-              .withVelocity(0.0)
-              .withFeedForward(totalFeedforward));
-    }
+    mMotor.setControl(
+        mPositionControl
+            .withPosition(targetRotations)
+            .withVelocity(targetVelocityRotPerSec)
+            .withFeedForward(feedforwardVolts));
   }
 
   @Override
   public void setVoltage(double volts) {
-    mMotor.setControl(mVoltageOut.withOutput(volts));
+    mMotor.setControl(mVoltageControl.withOutput(volts));
   }
 
   @Override
   public void stop() {
-    mMotor.setControl(mVoltageOut.withOutput(0));
+    mMotor.setControl(mVoltageControl.withOutput(0));
   }
 
   @Override
@@ -303,49 +265,51 @@ public class TurretIOReal implements TurretIO {
       return Double.NaN;
     }
 
-    // CANcoder returns rotations, range determined by
-    // AbsoluteSensorDiscontinuityPoint.
-    // Default is [-0.5, 0.5), we need [0, 1).
     double enc1Raw = motorAbsPos.getValueAsDouble();
     double enc2Raw = auxAbsPos.getValueAsDouble();
 
-    // Normalize to [0, 1)
-    double enc1Normalized = enc1Raw - Math.floor(enc1Raw);
-    double enc2Normalized = enc2Raw - Math.floor(enc2Raw);
+    System.out.println("CRT: motorEncoderRaw=" + enc1Raw + ", auxEncoderRaw=" + enc2Raw);
 
-    System.out.println(
-        "CRT: motorEncoder="
-            + enc1Raw
-            + " (norm="
-            + enc1Normalized
-            + "), auxEncoder="
-            + enc2Raw
-            + " (norm="
-            + enc2Normalized
-            + ")");
-
-    // CRT Calculation
-    double angleRads =
-        TurretCRTResolver.resolveAngleRads(
-            enc1Normalized,
-            enc2Normalized,
+    // CRT (Vernier) Calculation
+    double crtAngleRads =
+        TurretCRTResolver.resolveTurretAngleRads(
+            enc1Raw,
+            enc2Raw,
             Constants.Turret.kMotorGearTeeth,
             Constants.Turret.kAuxGearTeeth,
-            Constants.Turret.kTurretRingTeeth);
+            Constants.Turret.kTurretRingTeeth,
+            Constants.Turret.kMotorEncoderOffsetRotations,
+            Constants.Turret.kAuxEncoderOffsetRotations);
 
-    if (Double.isNaN(angleRads)) {
+    if (Double.isNaN(crtAngleRads)) {
       System.err.println("CRT INIT FAIL: CRT resolver returned NaN.");
       return Double.NaN;
     }
 
+    // ── 物理範圍映射 ──
+    // CRT 輸出可能在任意一個等效圈數，我們將其平移到最接近砲塔物理中心範圍的角度
+    double angleRads = crtAngleRads;
+    double rangeCenter = (Constants.Turret.kMinAngleRads + Constants.Turret.kMaxAngleRads) / 2.0;
+
+    // 將 CRT 角度平移到最接近 rangeCenter 的等價角 (-PI 到 +PI)
+    angleRads += Math.round((rangeCenter - angleRads) / (2.0 * Math.PI)) * 2.0 * Math.PI;
+
+    // 安全鉗位：如果是機械限制以外微小的浮點誤差
+    angleRads =
+        Math.max(
+            Constants.Turret.kMinAngleRads, Math.min(angleRads, Constants.Turret.kMaxAngleRads));
+
     // Write angle to motor encoder position.
     // Phoenix 6 setPosition uses mechanism rotations.
-    // SensorToMechanismRatio is already set, so we pass turret rotations.
+    // SensorToMechanismRatio is already set (4 * 87/19), so we pass mechanism
+    // (turret) rotations.
     double turretRotations = angleRads / (2.0 * Math.PI);
     mMotor.setPosition(turretRotations);
 
     System.out.println(
-        "CRT INIT OK: turret angle = "
+        "CRT INIT OK: crtRaw="
+            + Math.toDegrees(crtAngleRads)
+            + "° → mappedAngle="
             + Math.toDegrees(angleRads)
             + "° ("
             + turretRotations

@@ -127,7 +127,9 @@ public class IntakeWheel extends Subsystem {
 
   @Override
   public void climbOperate() {
-    processWantedState();
+    // Force wheels off during climb — do NOT follow driver toggle.
+    // Running intake while suspended wastes current and risks brownout.
+    mState = IntakeState.IDLE;
   }
 
   @Override
@@ -143,12 +145,26 @@ public class IntakeWheel extends Subsystem {
   @Override
   public void writePeriodicOutputs() {
     synchronized (this) {
+      // [AEROSPACE KINEMATICS] Velocity Forward-Feed Compensation
+      // Base voltage (2.75V) + 0.8V per 1 m/s of chassis speed
+      // Cap at 8.0V to prevent motor saturation and excessive kinetic energy
+      // bounce-outs
+      // double compensatedVoltage =
+      // Constants.Intake.kIntakeVoltage + (0.8 *
+      // frc.robot.GlobalData.chassisSpeedMetersPerSec);
+      // compensatedVoltage = Math.min(compensatedVoltage, 8.0);
+
+      double runVoltage = Constants.Intake.kIntakeVoltage;
+      if (frc.robot.GlobalData.isAutonomous) {
+        runVoltage = frc.robot.GlobalData.autoIntakeVoltage;
+      }
+
       switch (mState) {
         case RUNNING:
-          mIO.setVoltage(Constants.Intake.kIntakeVoltage);
+          mIO.setVoltage(runVoltage);
           break;
         case REVERSE:
-          mIO.setVoltage(-Constants.Intake.kIntakeVoltage);
+          mIO.setVoltage(-runVoltage);
           break;
         case IDLE:
         default:

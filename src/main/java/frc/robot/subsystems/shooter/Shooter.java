@@ -254,9 +254,16 @@ public class Shooter extends Subsystem {
     }
   }
 
+  public void scoreLockedOperate() {
+    scoreOperate();
+  }
+
   @Override
   public void passOperate() {
-    runVelocityControl();
+    var params = frc.robot.GlobalData.currentShotParams;
+    if (params != null && params.isValid) {
+      runVelocityControl(params.flywheelSpeedRotPerSec);
+    }
   }
 
   @Override

@@ -19,49 +19,37 @@ import frc.robot.PoseHistory;
 import frc.robot.VisionConstants;
 import frc.robot.framework.Subsystem;
 import frc.robot.subsystems.drive.Drive;
+import frc.robot.subsystems.drive.DriveIO;
 import frc.robot.subsystems.vision.VisionFieldPoseEstimate;
 
 /**
- * RobotStateEstimator - Dynamic EKF sensor fusion system.
+ * Single-source-of-truth pose estimator (Reference FRC 254 2025 architecture).
  *
- * <p>Reference FRC 254 2025 implementation for advanced pose estimation. Supports:
+ * <p>This class owns the ONLY {@link SwerveDrivePoseEstimator} in the system. There is no redundant
+ * {@code SwerveDriveOdometry} in Drive — all pose estimation flows through this class.
+ *
+ * <h3>Data Flow</h3>
+ *
+ * <pre>
+ * DriveIOReal (250Hz thread)
+ *   └─ OdometrySnapshot (volatile, immutable per cycle)
+ *        └─ RobotStateEstimator.readPeriodicInputs() (250Hz via Looper)
+ *             ├─ SwerveDrivePoseEstimator.updateWithTime()  ← odometry prediction
+ *             ├─ PoseHistory.addFieldToVehicleObservation() ← fused pose published
+ *             └─ PoseHistory.addFieldVelocityObservation()  ← field velocity published
+ *
+ * VisionSubsystem.writePeriodicOutputs()
+ *   └─ PoseHistory.updateMegatagEstimate()
+ *        └─ acceptVisionEstimate()
+ *             └─ SwerveDrivePoseEstimator.addVisionMeasurement() ← vision correction
+ * </pre>
+ *
+ * <h3>Standard Deviation Tuning (Reference 254 2025)</h3>
  *
  * <ul>
- *   <li><strong>Dual Limelight Vision Fusion</strong>: Receives fused vision estimates via
- *       RobotState
- *   <li><strong>Slip Detection</strong>: Reduces odometry trust when 4-wheel module speed
- *       differences exceed threshold
- *   <li><strong>Impact Detection</strong>: Pauses vision updates when acceleration exceeds
- *       threshold (data from RobotState, sourced from DriveIO)
- *   <li><strong>Update Timeout Detection</strong>: Warns when odometry hasn't updated for too long
- *   <li><strong>Dynamic Q/R Adjustment</strong>: Dynamically adjusts Kalman Filter standard
- *       deviations based on conditions
+ *   <li>Odometry: (0.3, 0.3, 0.2) — allows vision to influence the estimate
+ *   <li>Vision: dynamically scaled per-measurement by tag count, distance, and robot state
  * </ul>
- *
- * <p><strong>Pose fusion (Orbit2)</strong>: We use WPILib's SwerveDrivePoseEstimator (Kalman EKF).
- * Fusion is probabilistically sound; tuning is via simple heuristics:
- *
- * <ul>
- *   <li><strong>Slip</strong>: Trust vision more (lower vision std devs) so cameras correct
- *       position faster.
- *   <li><strong>Impact</strong>: Trust vision less (higher vision std devs) and ignore updates
- *       briefly; time sync is unreliable during hits.
- *   <li><strong>Normal</strong>: Default vision std devs from VisionConstants
- *       (kDefaultVisionStdDevs, kHighTrustVisionStdDevs, kLowTrustVisionStdDevs). Vision subsystem
- *       also sends per-measurement std devs (distance/tag count); we can scale again in
- *       acceptVisionEstimate.
- * </ul>
- *
- * <p>All tunables live in {@link frc.robot.VisionConstants}: slip/impact thresholds, vision std
- * devs, and trust intervals. No complex filter math—just easy-to-adjust constants.
- *
- * <p>ARCHITECTURE NOTE (254 Pattern): This class does NOT create its own Pigeon2 instance. All IMU
- * data is sourced from DriveIO → RobotState to maintain a single source of truth and avoid
- * duplicate CAN traffic.
- *
- * <p>Counter-Intuitive Engineering Insight: During high-speed movement or rotation, we REDUCE
- * vision update frequency because measurement quality degradation matters more than measurement
- * quantity.
  */
 public class RobotStateEstimator extends Subsystem {
   private static RobotStateEstimator mInstance;
@@ -77,14 +65,11 @@ public class RobotStateEstimator extends Subsystem {
     return mInstance != null;
   }
 
-  // WPILib Kalman Filter estimator (EKF implementation)
   private final SwerveDrivePoseEstimator mPoseEstimator;
   private final Drive mDrive = Drive.getInstance();
   private final PoseHistory mPoseHistory = PoseHistory.getInstance();
 
-  // State tracking
-  private boolean mIsSlipping = false;
-  private boolean mIsImpact = false;
+  // Fault state
   private boolean mIsOdometryStale = false;
   private boolean mIsTrusted = true;
   private int mConsecutiveTrustedCycles = 0;
@@ -92,216 +77,166 @@ public class RobotStateEstimator extends Subsystem {
   // Vision update tracking
   private double mLastVisionUpdateTime = 0;
 
-  // Impact recovery tracking
-  private double mImpactTime = 0;
+  // 250Hz snapshot tracking — skip duplicate updates
+  private double mLastOdometrySnapshotTimestamp = 0;
+
+  // Continuous trust score (0-1) for auto-shoot decisions
+  private double mTrustScore = 0.0;
+
+  // Odometry drift estimator: accumulates distance travelled since last vision
+  // update. Used to bound maximum expected position error from dead-reckoning.
+  private double mOdometryDriftMeters = 0.0;
+
+  // Pose stability ring buffer
+  private final Pose2d[] mRecentPoses = new Pose2d[VisionConstants.kPoseStabilityWindowSize];
+  private int mRecentPoseIdx = 0;
+  private int mRecentPoseCount = 0;
 
   private final Field2d mField2d = new Field2d();
 
   private RobotStateEstimator() {
-    // Initial standard deviations: [x, y, theta]
-    // Lower values = higher trust
-    Vector<N3> stateStdDevs = VecBuilder.fill(0.1, 0.1, 0.1); // Odometry trust
-    Vector<N3> visionStdDevs = VecBuilder.fill(0.7, 0.7, 0.9); // Vision trust (initial)
+    // 254 2025 reference: enabled (0.3, 0.3, 0.2), disabled (1.0, 1.0, 1.0)
+    Vector<N3> stateStdDevs = VecBuilder.fill(0.3, 0.3, 0.2);
+    Vector<N3> visionStdDevs = VecBuilder.fill(0.7, 0.7, 0.9);
+
+    Rotation2d initialGyro = mDrive.getHeading();
+    SwerveModulePosition[] initialPositions = mDrive.getModulePositions();
 
     mPoseEstimator =
         new SwerveDrivePoseEstimator(
             mDrive.getKinematics(),
-            new Rotation2d(),
-            new SwerveModulePosition[] {
-              new SwerveModulePosition(),
-              new SwerveModulePosition(),
-              new SwerveModulePosition(),
-              new SwerveModulePosition()
-            },
+            initialGyro,
+            initialPositions,
             new Pose2d(),
             stateStdDevs,
             visionStdDevs);
 
-    // Wire up vision estimate consumer
     mPoseHistory.setVisionEstimateConsumer(this::acceptVisionEstimate);
   }
 
+  // ============================================================
+  // SUBSYSTEM LIFECYCLE
+  // ============================================================
+
   @Override
   public void registerEnabledLoops(frc.robot.framework.Looper enabledLooper) {
-    System.out.println("RobotStateEstimator: Registering Loop");
-    enabledLooper.register(
-        new frc.robot.framework.ILoop() {
-          @Override
-          public void onStart(double timestamp) {}
-
-          @Override
-          public void onLoop(double timestamp) {
-            updateEstimator(timestamp);
-          }
-
-          @Override
-          public void onStop(double timestamp) {}
-        });
+    // No separate loop needed — all work is done in readPeriodicInputs().
   }
 
+  /**
+   * Core 250Hz update — reads the latest OdometrySnapshot from the dedicated thread, advances the
+   * EKF prediction step, publishes the fused pose and velocity to PoseHistory, and runs fault
+   * detection.
+   *
+   * <p>Execution order guarantee: SubsystemManager calls readPeriodicInputs() on subsystems in
+   * registration order. Drive is registered before RobotStateEstimator, so Drive's sensor data
+   * (used for slip/impact detection) is always fresh when this method runs.
+   */
   @Override
-  public void readPeriodicInputs() {}
+  public void readPeriodicInputs() {
+    DriveIO.OdometrySnapshot snap = mDrive.getIO().getLatestOdometrySnapshot();
+
+    // Skip if snapshot hasn't been updated (avoids double-processing same data)
+    if (snap.timestamp <= mLastOdometrySnapshotTimestamp || snap.timestamp == 0) {
+      return;
+    }
+
+    // --- Delayed Initial Pose Calibration (Anti-Race Condition) ---
+    // 等到我們真正拿到第一包有效且非 0 的 250Hz 封包時，才用裡面的 modulePositions 去做起點對位
+    if (frc.robot.GlobalData.pendingInitialPose != null) {
+      mPoseEstimator.resetPosition(
+          snap.gyroYaw, snap.modulePositions, frc.robot.GlobalData.pendingInitialPose);
+      mPoseHistory.reset(snap.timestamp, frc.robot.GlobalData.pendingInitialPose);
+
+      frc.robot.GlobalData.pendingInitialPose = null; // Consume
+    }
+
+    mLastOdometrySnapshotTimestamp = snap.timestamp;
+
+    // --- EKF Prediction Step ---
+    synchronized (this) {
+      mPoseEstimator.updateWithTime(snap.timestamp, snap.gyroYaw, snap.modulePositions);
+    }
+
+    // --- Publish fused pose to PoseHistory ---
+    Pose2d fusedPose = getEstimatedPose();
+    mPoseHistory.addFieldToVehicleObservation(snap.timestamp, fusedPose);
+
+    // --- Publish field velocity using EKF heading ---
+    ChassisSpeeds robotVel = mDrive.getRobotVelocity();
+    ChassisSpeeds fieldVel =
+        ChassisSpeeds.fromRobotRelativeSpeeds(robotVel, fusedPose.getRotation());
+    mPoseHistory.addFieldVelocityObservation(snap.timestamp, fieldVel);
+
+    // --- Pose stability tracking ---
+    mRecentPoses[mRecentPoseIdx] = fusedPose;
+    mRecentPoseIdx = (mRecentPoseIdx + 1) % mRecentPoses.length;
+    if (mRecentPoseCount < mRecentPoses.length) mRecentPoseCount++;
+
+    // --- Odometry drift estimator ---
+    // Accumulate estimated position error from dead-reckoning since last vision
+    double speed = Math.hypot(robotVel.vxMetersPerSecond, robotVel.vyMetersPerSecond);
+
+    // [KINEMATICS EXPORT] Export true chassis speed to GlobalData for feed-forward
+    // compensation
+    frc.robot.GlobalData.chassisSpeedMetersPerSec = speed;
+
+    double dtSnap = frc.robot.Constants.kLooperDt;
+    mOdometryDriftMeters += speed * dtSnap * VisionConstants.kOdometryDriftRatePerMeter;
+
+    // --- Fault detection ---
+    mIsOdometryStale = checkOdometryStale(snap);
+    updateTrustState();
+  }
 
   @Override
   public void writePeriodicOutputs() {}
 
-  /** Core update logic - called every cycle. */
-  private void updateEstimator(double timestamp) {
-    // 1. Get base data
-    Rotation2d gyroAngle = mDrive.getHeading();
-    SwerveModulePosition[] modulePositions = mDrive.getModulePositions();
-    SwerveModuleState[] moduleStates = mDrive.getModuleStates();
-
-    // 2. Fault detection (adaptive logic)
-    mIsSlipping = checkSlip(moduleStates);
-    mIsImpact = checkImpact(timestamp);
-    mIsOdometryStale = checkOdometryStale(timestamp, moduleStates);
-
-    // 3. Dynamic Q/R adjustment
-    adjustEstimatorWeights();
-
-    // 4. Update odometry (Kalman Filter prediction step)
-    mPoseEstimator.updateWithTime(timestamp, gyroAngle, modulePositions);
-
-    // DEBUG: Trace execution
-    // System.out.println("RSE Update: Gyro=" + gyroAngle.getDegrees() + " Pose=" +
-    // mPoseEstimator.getEstimatedPosition());
-
-    // 5. Update trust state
-    updateTrustState();
-  }
+  // ============================================================
+  // VISION FUSION
+  // ============================================================
 
   /**
-   * Determines if the current pose estimate is trusted enough for automatic aiming/shooting.
+   * Accepts vision estimate — called via PoseHistory consumer.
    *
-   * <p>A pose is trusted if: 1. We had a vision update within the last 1.0 second. 2. The robot has
-   * met the consecutive trusted cycles condition (no impact, no slip).
-   *
-   * @return True if the pose is reliable.
+   * <p>Innovation gating: if the vision measurement is far from the current EKF estimate, its
+   * stdDevs are inflated so the Kalman gain is reduced (soft reject instead of hard reject). This
+   * protects against occasional outliers while still allowing the filter to converge after large
+   * resets.
    */
-  public boolean isPoseTrusted() {
-    double timestamp = Timer.getFPGATimestamp();
-    boolean recentVision = (timestamp - mLastVisionUpdateTime) < 1.0;
-    return recentVision && mIsTrusted && !mIsOdometryStale;
-  }
-
-  /** Accepts vision estimate - called via RobotState consumer. */
   public synchronized void acceptVisionEstimate(VisionFieldPoseEstimate estimate) {
     double timestamp = Timer.getFPGATimestamp();
 
-    // Don't accept vision updates during impact recovery
-    if (mIsImpact || (timestamp - mImpactTime) < VisionConstants.kImpactRecoveryTimeSeconds) {
-      return;
+    Matrix<N3, N1> adjustedStdDevs = estimate.getVisionMeasurementStdDevs();
+
+    double innovation =
+        getEstimatedPose()
+            .getTranslation()
+            .getDistance(estimate.getVisionRobotPoseMeters().getTranslation());
+
+    if (innovation > VisionConstants.kMaxInnovationMeters) {
+      double scale =
+          Math.pow(
+              innovation / VisionConstants.kMaxInnovationMeters,
+              VisionConstants.kInnovationScalingExponent);
+      adjustedStdDevs = adjustedStdDevs.times(scale);
     }
 
-    // Apply our global context scaling to the incoming standard deviations
-    Matrix<N3, N1> adjustedStdDevs;
-    if (mIsImpact) {
-      // Impact overrides all: heavily distrust current visual stamps (likely motion
-      // blur or delay)
-      adjustedStdDevs = VisionConstants.kLowTrustVisionStdDevs;
-    } else if (mIsSlipping) {
-      // Slipping: odometry is lying, trust vision more than its base uncertainty
-      // suggests
-      adjustedStdDevs = estimate.getVisionMeasurementStdDevs().times(0.7);
-    } else {
-      // Normal: keep the supplied dynamic tag-based std devs
-      adjustedStdDevs = estimate.getVisionMeasurementStdDevs();
-    }
-
-    // Add vision measurement
     mPoseEstimator.addVisionMeasurement(
         estimate.getVisionRobotPoseMeters(), estimate.getTimestampSeconds(), adjustedStdDevs);
 
     mLastVisionUpdateTime = timestamp;
+    mOdometryDriftMeters = 0.0;
   }
 
-  /**
-   * Slip detection - Kinematic residual analysis.
-   *
-   * <p>Physics principle: Forward kinematics computes the 'best fit' chassis speeds given current
-   * module states. If we project this best fit back into theoretical module speeds (inverse
-   * kinematics), the difference (residual) between actual and theoretical indicates wheels slipping
-   * against the floor.
-   */
-  private boolean checkSlip(SwerveModuleState[] states) {
-    if (states == null || states.length < 4) return false;
+  // ============================================================
+  // FAULT DETECTION
+  // ============================================================
 
-    // 1. Calculate best-fit chassis speed from actual module states
-    ChassisSpeeds chassisSpeeds = mDrive.getKinematics().toChassisSpeeds(states);
+  private boolean checkOdometryStale(DriveIO.OdometrySnapshot snap) {
+    double timeSinceUpdate = Timer.getFPGATimestamp() - snap.timestamp;
+    SwerveModuleState[] states = mDrive.getModuleStates();
 
-    // Ignore near-zero speeds to prevent jitter triggering
-    if (Math.abs(chassisSpeeds.vxMetersPerSecond) < VisionConstants.kMovementThresholdMps
-        && Math.abs(chassisSpeeds.vyMetersPerSecond) < VisionConstants.kMovementThresholdMps
-        && Math.abs(chassisSpeeds.omegaRadiansPerSecond) < 0.1) {
-      return false;
-    }
-
-    // 2. Calculate theoretical module states from the best-fit chassis speed
-    SwerveModuleState[] theoreticalStates =
-        mDrive.getKinematics().toSwerveModuleStates(chassisSpeeds);
-
-    // 3. Find the maximum velocity error (residual)
-    double maxResidual = 0;
-    for (int i = 0; i < 4; i++) {
-      // We mainly care about speed mismatch, not angle (angle flip tracking can be
-      // complex)
-      double residual =
-          Math.abs(
-              Math.abs(states[i].speedMetersPerSecond)
-                  - Math.abs(theoreticalStates[i].speedMetersPerSecond));
-      if (residual > maxResidual) {
-        maxResidual = residual;
-      }
-    }
-
-    // If any wheel is deviating from the collective chassis model significantly, we
-    // are slipping
-    return maxResidual > VisionConstants.kSlipVelocityThresholdMps;
-  }
-
-  /**
-   * Impact detection - acceleration analysis.
-   *
-   * <p>Physics principle: During normal driving, acceleration mainly comes from 1g gravity. Impacts
-   * produce additional instantaneous acceleration peaks.
-   *
-   * <p>ARCHITECTURE NOTE: Acceleration data is sourced from RobotState (which gets it from DriveIO)
-   * to avoid duplicate Pigeon2 references.
-   */
-  private boolean checkImpact(double timestamp) {
-    // Get acceleration from RobotState (sourced from DriveIO)
-    double[] accel = mPoseHistory.getLatestAcceleration();
-    double accelX = accel[0];
-    double accelY = accel[1];
-    double accelZ = accel[2];
-
-    // Calculate acceleration magnitude after subtracting gravity
-    // Note: Accelerations are in m/s², so gravity is ~9.81 m/s²
-    double accelMagnitudeG =
-        Math.sqrt(accelX * accelX + accelY * accelY + Math.pow(accelZ - 9.81, 2)) / 9.81;
-
-    boolean isImpact = accelMagnitudeG > VisionConstants.kImpactAccelThresholdG;
-
-    if (isImpact) {
-      mImpactTime = timestamp;
-    }
-
-    return isImpact;
-  }
-
-  /**
-   * Odometry update timeout detection.
-   *
-   * <p>If robot is moving but odometry hasn't updated for a long time, may indicate sensor failure.
-   */
-  private boolean checkOdometryStale(double timestamp, SwerveModuleState[] states) {
-    // Determine the actual time since the hardware signals were stamped, rather
-    // than loop timing
-    double hardwareTimestamp = mDrive.getInputs().timestamp;
-    double timeSinceUpdate = timestamp - hardwareTimestamp;
-
-    // Check if robot is commanded to move
     double sum = 0;
     for (SwerveModuleState s : states) sum += Math.abs(s.speedMetersPerSecond);
     double avgSpeed = sum / states.length;
@@ -310,33 +245,12 @@ public class RobotStateEstimator extends Subsystem {
     return isMoving && timeSinceUpdate > VisionConstants.kOdometryStaleTimeoutSeconds;
   }
 
-  /** Dynamically adjust estimator weights. */
-  private void adjustEstimatorWeights() {
-    // Note: in the Orbit2 architecture, we process incoming vision measurement
-    // scaling IN The acceptVisionEstimate() method
-    // Because SwerveDrivePoseEstimator requires per-measurement StdDevs when using
-    // addVisionMeasurement.
-    // However, if we want to change the underlying Odometry Trust, WPILib does not
-    // allow modifying the Odometry weight matrix post-initialization.
-    // Thus this acts as a no-op, relying on acceptVisionEstimate() scaled inputs
-    // instead.
-  }
-
-  /** Update trust state. */
   private void updateTrustState() {
-    double timestamp = Timer.getFPGATimestamp();
-    double timeSinceVision = timestamp - mLastVisionUpdateTime;
-
-    // Trust conditions:
-    // 1. Not slipping
-    // 2. Not impacting
-    // 3. Odometry updating normally
-    // 4. Vision updating within reasonable time
+    // Trust requires: no active faults AND estimated drift within budget.
+    // The drift budget is generous (default 0.30m) — it represents the point
+    // at which pure dead-reckoning error becomes too large for auto-scoring.
     boolean currentlyTrusted =
-        !mIsSlipping
-            && !mIsImpact
-            && !mIsOdometryStale
-            && timeSinceVision < VisionConstants.kVisionUpdateMaxIntervalSeconds;
+        !mIsOdometryStale && mOdometryDriftMeters < VisionConstants.kMaxOdometryDriftMeters;
 
     if (currentlyTrusted) {
       mConsecutiveTrustedCycles++;
@@ -344,42 +258,103 @@ public class RobotStateEstimator extends Subsystem {
       mConsecutiveTrustedCycles = 0;
     }
 
-    // Need consecutive cycles before considered truly trusted
     mIsTrusted = mConsecutiveTrustedCycles >= VisionConstants.kMinConsecutiveTrustedCycles;
+
+    // --- Continuous trust score (EMA) ---
+    double faultFactor = mIsOdometryStale ? 0.3 : 1.0;
+
+    // Drift-based freshness: 1.0 at zero drift, decays to 0 at max drift
+    double driftFreshness =
+        Math.max(0.0, 1.0 - mOdometryDriftMeters / VisionConstants.kMaxOdometryDriftMeters);
+
+    double stabilityFactor = isPoseStable() ? 1.0 : 0.5;
+
+    double targetScore = faultFactor * driftFreshness * stabilityFactor;
+    double alpha = VisionConstants.kTrustScoreAlpha;
+    mTrustScore = mTrustScore * (1.0 - alpha) + targetScore * alpha;
+  }
+
+  /**
+   * Checks whether recent poses are consistent (low jitter). Returns false if the stability window
+   * is not yet filled.
+   */
+  private boolean isPoseStable() {
+    if (mRecentPoseCount < VisionConstants.kPoseStabilityMinSamples) return false;
+
+    int latestIdx = (mRecentPoseIdx - 1 + mRecentPoses.length) % mRecentPoses.length;
+    Pose2d latest = mRecentPoses[latestIdx];
+    if (latest == null) return false;
+
+    double dt = frc.robot.Constants.kLooperDt;
+    double maxSpeedMps = 5.0; // Assume max robot speed of 5 m/s
+
+    for (int i = 0; i < mRecentPoseCount; i++) {
+      if (i == latestIdx) continue;
+      Pose2d p = mRecentPoses[i];
+      if (p == null) continue;
+
+      int ageCycles = (latestIdx - i + mRecentPoses.length) % mRecentPoses.length;
+      double allowedDist = VisionConstants.kMaxPoseJitterMeters + (ageCycles * dt * maxSpeedMps);
+
+      if (latest.getTranslation().getDistance(p.getTranslation()) > allowedDist) {
+        return false;
+      }
+    }
+    return true;
   }
 
   // ============================================================
-  // PUBLIC METHODS
+  // PUBLIC API
   // ============================================================
 
   public synchronized Pose2d getEstimatedPose() {
     return mPoseEstimator.getEstimatedPosition();
   }
 
+  public boolean isPoseTrusted() {
+    // 💡 反直覺工程觀點 (Counter-Intuitive Engineering Insight):
+    // 雖然 Swerve Odometry 在短時間內能精準推算，但如果完全失去視覺校正，
+    // 其累積誤差會在幾秒後大到足以讓自動瞄準 (Auto-Shoot) 失准。
+    // 因此除了里程計漂移估計 (mIsTrusted) 以外，增加硬性的「3秒內必定要有一次有效視覺更新」
+    // (不是只有看到 Tag，而是真正送入 EKF 進行更新)，才是最安全的失效保護機制。
+    double timeSinceLastVision =
+        edu.wpi.first.wpilibj.Timer.getFPGATimestamp() - mLastVisionUpdateTime;
+    boolean hasRecentVision = timeSinceLastVision <= 3.0;
+
+    return mIsTrusted && !mIsOdometryStale && hasRecentVision;
+  }
+
   /**
-   * @return Whether pose is trusted (all trust conditions met)
+   * Estimated odometry drift in meters since the last vision correction. Useful for UI and
+   * debugging.
    */
+  public double getOdometryDriftMeters() {
+    return mOdometryDriftMeters;
+  }
+
+  /**
+   * Returns whether the pose is accurate and stable enough for autonomous shooting. Combines
+   * continuous trust score, pose stability, and fault detection into a single gate.
+   */
+  public boolean isReadyToShoot() {
+    return mTrustScore >= VisionConstants.kTrustScoreForAutoShoot && isPoseStable();
+  }
+
+  /**
+   * Continuous trust score (0–1). Suitable for UI display, interpolating shot parameters, or
+   * gradual autonomous decisions.
+   */
+  public double getPoseTrustScore() {
+    return mTrustScore;
+  }
+
   public synchronized boolean isTrusted() {
     return mIsTrusted;
   }
 
-  /**
-   * @return Whether currently slipping
-   */
-  public boolean isSlipping() {
-    return mIsSlipping;
-  }
-
-  /**
-   * @return Whether impact detected
-   */
-  public boolean isImpact() {
-    return mIsImpact;
-  }
-
-  /** Resets estimator to specified pose. */
   public synchronized void resetPose(Pose2d pose) {
     mPoseEstimator.resetPosition(mDrive.getHeading(), mDrive.getModulePositions(), pose);
+    mOdometryDriftMeters = 0.0;
   }
 
   @Override
@@ -402,17 +377,17 @@ public class RobotStateEstimator extends Subsystem {
 
   @Override
   public void outputTelemetry() {
-    var dashboard = frc.robot.DashboardState.getInstance();
-    dashboard.robotPose = mPoseEstimator.getEstimatedPosition();
-    dashboard.robotImpacting = mIsImpact;
-    dashboard.odometryStale = mIsOdometryStale;
-    dashboard.robotSlipping = mIsSlipping;
-    dashboard.lastVisionTimestamp = mLastVisionUpdateTime;
+    Pose2d currentPose = getEstimatedPose();
 
-    // Calculate and publish distance to Hub center (shortest/Euclidean)
+    var dashboard = frc.robot.DashboardState.getInstance();
+    dashboard.robotPose = currentPose;
+    dashboard.odometryDrift = mOdometryDriftMeters;
+    dashboard.poseStable = isPoseStable();
+    dashboard.isTrusted = mIsTrusted;
+    dashboard.trustScore = mTrustScore;
+
     double distanceToHub =
-        mPoseEstimator
-            .getEstimatedPosition()
+        currentPose
             .getTranslation()
             .getDistance(FieldConstants.Hub.topCenterPoint.toTranslation2d());
 
@@ -420,10 +395,17 @@ public class RobotStateEstimator extends Subsystem {
     SmartDashboard.putNumber(
         "RobotStateEstimator/LastVisionSecsAgoToNow",
         Timer.getFPGATimestamp() - mLastVisionUpdateTime);
-    SmartDashboard.putBoolean("RobotStateEstimator/IsSlipping", mIsSlipping);
     SmartDashboard.putBoolean("RobotStateEstimator/IsTrusted", mIsTrusted);
+    SmartDashboard.putNumber("RobotStateEstimator/TrustScore", mTrustScore);
+    SmartDashboard.putNumber("RobotStateEstimator/OdometryDrift", mOdometryDriftMeters);
+    SmartDashboard.putBoolean("RobotStateEstimator/ReadyToShoot", isReadyToShoot());
+    SmartDashboard.putBoolean("RobotStateEstimator/PoseStable", isPoseStable());
 
-    mField2d.setRobotPose(mPoseEstimator.getEstimatedPosition());
+    SmartDashboard.putNumber("RobotStateEstimator/RawGyroDeg", mDrive.getHeading().getDegrees());
+    SmartDashboard.putNumber(
+        "RobotStateEstimator/EKFHeadingDeg", currentPose.getRotation().getDegrees());
+
+    mField2d.setRobotPose(currentPose);
     SmartDashboard.putData("Field", mField2d);
   }
 

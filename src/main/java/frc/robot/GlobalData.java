@@ -37,6 +37,13 @@ public class GlobalData {
   /** True when running in test mode. */
   public static volatile boolean isTestMode = false;
 
+  /**
+   * Pending initial pose for autonomous mode. This is set in robotInit() and consumed by
+   * RobotStateEstimator in the first valid 250Hz OdometrySnapshot cycle to ensure accurate module
+   * angles for reset.
+   */
+  public static volatile edu.wpi.first.math.geometry.Pose2d pendingInitialPose = null;
+
   // ============================================================
   // GAME PIECE & INTAKE STATE
   // ============================================================
@@ -55,6 +62,12 @@ public class GlobalData {
 
   /** Current wanted state of the Intake Wheel (Circle=Forward, Square=Reverse). */
   public static volatile IntakeActiveState intakeWheelWantedState = IntakeActiveState.IDLE;
+
+  /**
+   * Wanted voltage for the Intake Wheel during autonomous. Defaults to 6.0V, but can be overridden
+   * by specific auto routines (e.g., set to 8.0V for shooting).
+   */
+  public static volatile double autoIntakeVoltage = 6.0;
 
   // ============================================================
   // HUB GAME STATE
@@ -85,4 +98,14 @@ public class GlobalData {
 
   /** Whether border/boundary protection is enabled. */
   public static volatile boolean borderProtectionEnabled = false;
+
+  // ============================================================
+  // KINEMATICS STATE
+  // ============================================================
+
+  /**
+   * Current chassis linear speed in meters per second. Updated directly by the
+   * single-source-of-truth RobotStateEstimator.
+   */
+  public static volatile double chassisSpeedMetersPerSec = 0.0;
 }

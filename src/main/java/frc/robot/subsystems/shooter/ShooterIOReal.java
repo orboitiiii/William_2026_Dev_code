@@ -131,29 +131,27 @@ public class ShooterIOReal implements ShooterIO {
     mLeftAppliedVolts = mLeftMotor.getMotorVoltage();
     mLeftCurrent = mLeftMotor.getSupplyCurrent();
 
-    // FAIL-SAFE: Only register signals if configuration succeeded
-    if (rightOk && leftOk) {
-      mAllSignals =
-          new BaseStatusSignal[] {
-            mRightPosition,
-            mRightVelocity,
-            mRightAppliedVolts,
-            mRightCurrent,
-            mLeftVelocity,
-            mLeftAppliedVolts,
-            mLeftCurrent
-          };
+    mAllSignals =
+        new BaseStatusSignal[] {
+          mRightPosition,
+          mRightVelocity,
+          mRightAppliedVolts,
+          mRightCurrent,
+          mLeftVelocity,
+          mLeftAppliedVolts,
+          mLeftCurrent
+        };
 
-      // Configure 50Hz update rate
-      BaseStatusSignal.setUpdateFrequencyForAll(50.0, mAllSignals);
+    // Configure 50Hz update rate
+    BaseStatusSignal.setUpdateFrequencyForAll(50.0, mAllSignals);
 
-      // Minimize CAN bus usage by disabling unused status frames
-      mRightMotor.optimizeBusUtilization();
-      mLeftMotor.optimizeBusUtilization();
-    } else {
+    // Minimize CAN bus usage by disabling unused status frames
+    mRightMotor.optimizeBusUtilization();
+    mLeftMotor.optimizeBusUtilization();
+
+    if (!rightOk || !leftOk) {
       System.err.println(
-          "CRITICAL: Shooter FAILED config - Excluding from synchronous updates to prevent Loop Overrun.");
-      mAllSignals = new BaseStatusSignal[0];
+          "CRITICAL: Shooter FAILED config. Will still poll its status but it may be unresponsive.");
     }
 
     // PAUSE: Allow CAN buffer to drain

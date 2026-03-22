@@ -1,6 +1,7 @@
 package frc.robot.subsystems.drive;
 
 import edu.wpi.first.math.geometry.Rotation2d;
+import edu.wpi.first.math.kinematics.SwerveModulePosition;
 
 /**
  * Hardware abstraction interface for the Drive subsystem.
@@ -227,4 +228,51 @@ public interface DriveIO {
   public default int getPigeonFirmwareVersion() {
     return 0;
   }
+
+  // ============================================================
+  // HIGH-FREQUENCY ODOMETRY (250Hz Thread)
+  // ============================================================
+
+  /**
+   * Thread-safe snapshot of odometry-critical sensor data.
+   *
+   * <p>Produced by the dedicated 250Hz odometry thread using {@code BaseStatusSignal.waitForAll()}
+   * for optimal time synchronization. Each snapshot is an immutable object — the thread creates a
+   * new instance per cycle and publishes it via a volatile reference to guarantee readers never see
+   * a half-written state.
+   */
+  public static class OdometrySnapshot {
+    public double timestamp;
+    public Rotation2d gyroYaw = new Rotation2d();
+    public double gyroYawVelocityRadPerSec;
+    public double gyroPitchVelocityRadPerSec;
+    public double gyroRollVelocityRadPerSec;
+    public double[] accelMetersPerSec2 = new double[3];
+    public double[] drivePositionRotations = new double[4];
+    public double[] steerPositionRotations = new double[4];
+    public SwerveModulePosition[] modulePositions =
+        new SwerveModulePosition[] {
+          new SwerveModulePosition(),
+          new SwerveModulePosition(),
+          new SwerveModulePosition(),
+          new SwerveModulePosition()
+        };
+  }
+
+  /**
+   * Returns the latest odometry snapshot from the 250Hz thread.
+   *
+   * @return The most recently captured OdometrySnapshot (never null).
+   */
+  public default OdometrySnapshot getLatestOdometrySnapshot() {
+    return new OdometrySnapshot();
+  }
+
+  /**
+   * Starts the dedicated 250Hz odometry thread.
+   *
+   * <p>On real hardware, this thread uses {@code BaseStatusSignal.waitForAll()} for CAN-frame-level
+   * time synchronization. In simulation, this is a no-op (the main loop handles updates).
+   */
+  public default void startOdometryThread() {}
 }

@@ -185,3 +185,39 @@ compile_commands.json
 
 # Eclipse generated file for annotation processors
 .factorypath
+
+### FRC Specific / Project Custom ###
+# SysId data and analysis
+sysid_*.csv
+sysid_data/
+sysid_fit_plot.png
+sysid_indexer_side/
+sysid_indexer_straight/
+analyze_sysid.py
+gravity_lookup_table.csv
+gravity_profile.png
+residuals_vs_angle.png
+residuals_vs_position.png
+
+# Temporary logs and terminal outputs
+build_log.txt
+build_log_utf8.txt
+commit_msg.txt
+out.txt
+tmp_repo/
+v3_output.txt
+v3_output_ansi.txt
+v3_output_utf8.txt
+v3_adjusted.txt
+v3_adjusted_utf8.txt
+v3_1_output.txt
+v3_1_out_utf8.txt
+pass_v2_output.txt
+pass_v2_out.txt
+pass_v2_out_utf8.txt
+pass_v2_1_output.txt
+pass_v2_1_out_utf8.txt
+
+# Python cache
+__pycache__/
+*.pyc

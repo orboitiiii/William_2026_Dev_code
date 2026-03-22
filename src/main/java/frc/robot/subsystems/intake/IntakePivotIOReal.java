@@ -112,7 +112,7 @@ public class IntakePivotIOReal implements IntakePivotIO {
             "IntakePivot Right Motor Config");
 
     // --- Initial Position (Right) ---
-    mRightMotor.setPosition(Constants.IntakePivot.kMinAngle);
+    mRightMotor.setPosition(Constants.IntakePivot.kMaxAngle);
     Timer.delay(0.1);
 
     // --- Left Motor Configuration ---
@@ -180,7 +180,7 @@ public class IntakePivotIOReal implements IntakePivotIO {
             () -> mLeftMotor.getConfigurator().apply(leftConfig), "IntakePivot Left Motor Config");
 
     // --- Initial Position (Left) ---
-    mLeftMotor.setPosition(Constants.IntakePivot.kMinAngle);
+    mLeftMotor.setPosition(Constants.IntakePivot.kMaxAngle);
     Timer.delay(0.1);
 
     // --- Configure Updates ---
@@ -192,23 +192,22 @@ public class IntakePivotIOReal implements IntakePivotIO {
     mLeftAppliedVolts = mLeftMotor.getMotorVoltage();
     mLeftCurrent = mLeftMotor.getSupplyCurrent();
 
-    if (isRightValid && isLeftValid) {
-      mAllSignals =
-          new BaseStatusSignal[] {
-            mPosition, mVelocity, mRightAppliedVolts, mRightCurrent, mLeftAppliedVolts, mLeftCurrent
-          };
+    mAllSignals =
+        new BaseStatusSignal[] {
+          mPosition, mVelocity, mRightAppliedVolts, mRightCurrent, mLeftAppliedVolts, mLeftCurrent
+        };
 
-      // Optimize bus
-      mRightMotor.optimizeBusUtilization();
-      mLeftMotor.optimizeBusUtilization();
-      Timer.delay(0.05);
+    // Optimize bus (always attempt)
+    mRightMotor.optimizeBusUtilization();
+    mLeftMotor.optimizeBusUtilization();
+    Timer.delay(0.05);
 
-      // Set Update Frequency
-      BaseStatusSignal.setUpdateFrequencyForAll(50.0, mAllSignals);
-    } else {
-      mAllSignals = new BaseStatusSignal[0];
+    // Set Update Frequency
+    BaseStatusSignal.setUpdateFrequencyForAll(50.0, mAllSignals);
+
+    if (!isRightValid || !isLeftValid) {
       System.err.println(
-          "CRITICAL: IntakePivot FAILED config - Excluding from synchronous updates.");
+          "CRITICAL: IntakePivot FAILED config. Will still poll its status but it may be unresponsive.");
     }
   }
 

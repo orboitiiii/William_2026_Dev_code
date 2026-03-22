@@ -33,8 +33,8 @@ import java.util.List;
  * @see ILoop
  */
 public class Looper implements ILoop {
-  /** Loop period in seconds (50Hz = 0.02s). */
-  public static final double kPeriod = 0.02;
+  /** Loop period in seconds (250Hz = 0.004). */
+  public static final double kPeriod = frc.robot.Constants.kLooperDt;
 
   private boolean mRunning;
 

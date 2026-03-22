@@ -38,13 +38,13 @@ class ShotSplineTest {
 
   private static final double[] FLYWHEEL_SPEEDS = {
     34.20, 39.30, 44.40, 49.10, 49.30, 49.50, 49.70, 50.00, 50.30, 50.70, 51.60, 52.80, 54.20,
-    55.60, 57.40, 59.30, 61.30, 63.40, 65.60, 67.90, 70.30, 72.80, 75.30, 77.80, 80.30
+    55.60, 57.40, 59.30, 60.80, 62.50, 64.40, 66.50, 68.80, 71.10, 73.50, 75.90, 78.40
   };
 
   private static final double[] TIME_OF_FLIGHT = {
     0.7719, 1.0202, 1.2222, 1.3912, 1.3913, 1.3914, 1.3910, 1.3908, 1.3898, 1.3892, 1.4063, 1.4312,
-    1.4607, 1.4883, 1.5263, 1.5647, 1.6035, 1.6427, 1.6822, 1.7220, 1.7617, 1.8055, 1.8669, 1.9272,
-    1.9864
+    1.4607, 1.4883, 1.5263, 1.5647, 1.6150, 1.6600, 1.7050, 1.7500, 1.7950, 1.8450, 1.9050, 1.9700,
+    2.0350
   };
 
   // ══════════════════════════════════════════════════════════════════
@@ -186,9 +186,10 @@ class ShotSplineTest {
       assertTrue(
           fw > 30 && fw < 100,
           "Flywheel speed out of physical bounds at d=" + d + "m: " + fw + " rot/s");
-      // ToF: 0.5 to 2.0 seconds (high-arc trajectories have longer ToF)
+      // ToF: 0.5 to 2.1 seconds (high-arc trajectories have longer ToF, max 2.035 at
+      // 6.5m)
       assertTrue(
-          tof > 0.5 && tof < 2.0, "ToF out of physical bounds at d=" + d + "m: " + tof + " s");
+          tof > 0.5 && tof < 2.1, "ToF out of physical bounds at d=" + d + "m: " + tof + " s");
     }
   }
 

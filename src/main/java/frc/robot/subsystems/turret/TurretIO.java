@@ -50,6 +50,12 @@ public interface TurretIO {
     /** Absolute position of auxiliary encoder in rotations (0-1). */
     public double auxEncoderAbsPosRotations = 0.0;
 
+    /** Raw (unoffset) absolute position of motor encoder in rotations. */
+    public double motorEncoderRawRotations = 0.0;
+
+    /** Raw (unoffset) absolute position of auxiliary encoder in rotations. */
+    public double auxEncoderRawRotations = 0.0;
+
     /** FPGA timestamp of the last input update. */
     public double timestamp = 0.0;
   }

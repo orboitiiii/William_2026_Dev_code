@@ -43,6 +43,8 @@ public class IntakeWheelIOReal implements IntakeWheelIO {
     // Current Limits
     config.CurrentLimits.SupplyCurrentLimit = Constants.Intake.kSupplyCurrentLimit;
     config.CurrentLimits.SupplyCurrentLimitEnable = Constants.Intake.kSupplyCurrentLimitEnable;
+    config.CurrentLimits.StatorCurrentLimit = Constants.Intake.kStatorCurrentLimit;
+    config.CurrentLimits.StatorCurrentLimitEnable = Constants.Intake.kStatorCurrentLimitEnable;
 
     mIntakeMotor.getConfigurator().apply(config);
     mIntakeFollower.getConfigurator().apply(config);

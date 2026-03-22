@@ -331,22 +331,32 @@ public class Hood extends Subsystem {
 
   @Override
   public void travelOperate() {
-    // Stow to Maximum angle (Retracted)
-    setGoalParams(kMaxAngle, 0.0);
+    var params = frc.robot.GlobalData.currentShotParams;
+    if (params != null && params.hasTarget) {
+      setGoalParams(params.hoodAngleRad, 0.0);
+    } else {
+      setGoalParams(kMaxAngle, 0.0);
+    }
   }
 
   @Override
   public void scoreOperate() {
     var params = frc.robot.GlobalData.currentShotParams;
-    if (params != null && params.isValid) {
+    if (params != null && params.hasTarget) {
       setGoalParams(params.hoodAngleRad, params.hoodVelocityRadPerSec);
     }
   }
 
+  public void scoreLockedOperate() {
+    scoreOperate();
+  }
+
   @Override
   public void passOperate() {
-    // Hold current position explicitly with 0 velocity
-    setGoalParams(getMeasuredAngleRads(), 0.0);
+    var params = frc.robot.GlobalData.currentShotParams;
+    if (params != null && params.hasTarget) {
+      setGoalParams(params.hoodAngleRad, params.hoodVelocityRadPerSec);
+    }
   }
 
   @Override
@@ -372,14 +382,14 @@ public class Hood extends Subsystem {
     PID
   }
 
-  private HoodTestRoutine mHoodTestRoutine = HoodTestRoutine.SYSID;
+  private HoodTestRoutine mHoodTestRoutine = HoodTestRoutine.PID;
   private boolean mHoodSysIdButtonWasPressed = false;
 
   @Override
   public void handleTestMode(frc.robot.ControlBoard control) {
     switch (mHoodTestRoutine) {
       case VOLTAGE -> {
-        double testVoltage = 1.0;
+        double testVoltage = 6.0;
         if (control.getTriangleButton()) {
           setOpenLoopVoltage(testVoltage);
         } else if (control.getCrossButton()) {
@@ -413,9 +423,9 @@ public class Hood extends Subsystem {
       }
       case PID -> {
         if (control.getCrossButton()) {
-          setGoalParams(Math.toRadians(62.5), 0.0);
+          setGoalParams(Constants.Hood.kMinAngleRads, 0.0);
         } else if (control.getTriangleButton()) {
-          setGoalParams(Math.toRadians(82), 0.0);
+          setGoalParams(Constants.Hood.kMaxAngleRads, 0.0);
         } else {
           setOpenLoopVoltage(0.0);
         }
@@ -474,13 +484,20 @@ public class Hood extends Subsystem {
     // kS is applied manually here to control directionality
     double angleRads = getMeasuredAngleRads();
 
+    // Apply velocity deadband to suppress numerical-derivative noise from
+    // ShotCalculator. Tiny velocities cause kS direction to flip every cycle.
+    double effectiveVelocity = mGoalVelocityRadsPerSec;
+    if (Math.abs(effectiveVelocity) < Constants.Hood.kVelocityDeadbandRadPerSec) {
+      effectiveVelocity = 0.0;
+    }
+
     // Determine direction for kS application
-    // If moving (non-non-zero velocity goal), use velocity direction.
+    // If moving (non-zero velocity goal), use velocity direction.
     // If holding (zero velocity goal), use error direction to overcome stiction.
-    double direction = Math.signum(mGoalVelocityRadsPerSec);
-    if (Math.abs(mGoalVelocityRadsPerSec) < 1e-3) {
+    double direction = Math.signum(effectiveVelocity);
+    if (effectiveVelocity == 0.0) {
       double error = mGoalAngleRads - angleRads;
-      if (Math.abs(error) > Constants.Hood.kPositionToleranceRads * 0.5) {
+      if (Math.abs(error) > Constants.Hood.kPositionToleranceRadsEnter * 0.5) {
         direction = Math.signum(error);
       } else {
         direction = 0.0;
@@ -491,21 +508,26 @@ public class Hood extends Subsystem {
 
     // Only apply robot acceleration compensation if we are actively tracking/moving
     double accelComp = 0.0;
-    if (Math.abs(mGoalVelocityRadsPerSec) > 1e-3) {
+    if (Math.abs(effectiveVelocity) > 0.0) {
       accelComp = Constants.Hood.kARobot * Math.sin(angleRads) * robotAccel;
     }
 
     double arbFF = kS + Constants.Hood.kG * Math.cos(angleRads) + accelComp;
 
-    mIO.setPositionSetpoint(encoderSetpoint, mGoalVelocityRadsPerSec, arbFF);
+    mIO.setPositionSetpoint(encoderSetpoint, effectiveVelocity, arbFF);
 
-    // Check if at goal (using constant tolerance)
+    // Check if at goal (enter/exit hysteresis to prevent chatter)
     double measuredAngle = getMeasuredAngleRads();
-    double toleranceRads = Constants.Hood.kPositionToleranceRads;
-    mAtGoal =
-        DriverStation.isEnabled()
-            && mZeroed
-            && Math.abs(measuredAngle - clampedGoal) < toleranceRads;
+    double error = Math.abs(measuredAngle - clampedGoal);
+    if (mAtGoal) {
+      mAtGoal =
+          DriverStation.isEnabled() && mZeroed && error < Constants.Hood.kPositionToleranceRadsExit;
+    } else {
+      mAtGoal =
+          DriverStation.isEnabled()
+              && mZeroed
+              && error < Constants.Hood.kPositionToleranceRadsEnter;
+    }
   }
 
   @Override

@@ -107,22 +107,21 @@ public class HoodIOReal implements HoodIO {
     mAppliedVolts = mMotor.getMotorVoltage();
     mCurrent = mMotor.getSupplyCurrent();
 
-    if (isConfigValid) {
-      mAllSignals = new BaseStatusSignal[] {mPosition, mVelocity, mAppliedVolts, mCurrent};
+    mAllSignals = new BaseStatusSignal[] {mPosition, mVelocity, mAppliedVolts, mCurrent};
 
-      // Configure 50Hz update rate
-      // Minimize CAN bus usage by disabling unused status frames
-      mMotor.optimizeBusUtilization();
+    // Configure 50Hz update rate
+    // Minimize CAN bus usage by disabling unused status frames
+    mMotor.optimizeBusUtilization();
 
-      // PAUSE: Allow CAN buffer to drain
-      Timer.delay(0.05);
+    // PAUSE: Allow CAN buffer to drain
+    Timer.delay(0.05);
 
-      // Configure 50Hz update rate
-      BaseStatusSignal.setUpdateFrequencyForAll(50.0, mAllSignals);
-    } else {
-      mAllSignals = new BaseStatusSignal[0];
+    // Configure 50Hz update rate
+    BaseStatusSignal.setUpdateFrequencyForAll(50.0, mAllSignals);
+
+    if (!isConfigValid) {
       System.err.println(
-          "CRITICAL: Hood FAILED config - Excluding from synchronous updates to prevent Loop Overrun.");
+          "CRITICAL: Hood FAILED config. Will still poll its status but it may be unresponsive.");
     }
   }
 

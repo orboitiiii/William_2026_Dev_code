@@ -134,6 +134,11 @@ public class TrajectoryFollower {
     Pose2d targetPose = target.pose();
     ChassisSpeeds feedforward = target.speeds();
 
+    if (frc.robot.util.geometry.AllianceFlipUtil.shouldFlip()) {
+      targetPose = frc.robot.libraries.lib9427.utils.FlippingUtil.flipFieldPose(targetPose);
+      feedforward = frc.robot.libraries.lib9427.utils.FlippingUtil.flipFieldSpeeds(feedforward);
+    }
+
     // Zero feedforward for the last 3 points (User Request)
     // This allows the robot to settle gently using only PID.
     double cutoffTime = mCurrentTrajectory.getTimeAtLastPointMinus(3);
@@ -181,6 +186,11 @@ public class TrajectoryFollower {
     TrajectoryPoint target = mCurrentTrajectory.sample(elapsedTime);
     Pose2d targetPose = target.pose();
     ChassisSpeeds feedforward = target.speeds();
+
+    if (frc.robot.util.geometry.AllianceFlipUtil.shouldFlip()) {
+      targetPose = frc.robot.libraries.lib9427.utils.FlippingUtil.flipFieldPose(targetPose);
+      feedforward = frc.robot.libraries.lib9427.utils.FlippingUtil.flipFieldSpeeds(feedforward);
+    }
 
     double xFeedback = mXController.calculate(currentPose.getX(), targetPose.getX());
     double yFeedback = mYController.calculate(currentPose.getY(), targetPose.getY());

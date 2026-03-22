@@ -57,8 +57,8 @@ public interface VisionIO {
     /** Left camera (base) inputs */
     public CameraInputs cameraLeft = new CameraInputs();
 
-    /** Right camera (turret) inputs */
-    public CameraInputs cameraRight = new CameraInputs();
+    /** Up camera (static) inputs */
+    public CameraInputs cameraUp = new CameraInputs();
 
     /** Front camera connection status */
     public boolean cameraFrontConnected = false;
@@ -66,8 +66,8 @@ public interface VisionIO {
     /** Left camera connection status */
     public boolean cameraLeftConnected = false;
 
-    /** Right camera connection status */
-    public boolean cameraRightConnected = false;
+    /** Up camera connection status */
+    public boolean cameraUpConnected = false;
   }
 
   /**

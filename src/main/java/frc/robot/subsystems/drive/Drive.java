@@ -5,29 +5,34 @@ import edu.wpi.first.math.geometry.Rotation2d;
 import edu.wpi.first.math.geometry.Translation2d;
 import edu.wpi.first.math.kinematics.ChassisSpeeds;
 import edu.wpi.first.math.kinematics.SwerveDriveKinematics;
-import edu.wpi.first.math.kinematics.SwerveDriveOdometry;
 import edu.wpi.first.math.kinematics.SwerveModulePosition;
 import edu.wpi.first.math.kinematics.SwerveModuleState;
+import edu.wpi.first.units.Units;
+import edu.wpi.first.wpilibj.Timer;
 import frc.robot.Constants;
 import frc.robot.PoseHistory;
+import frc.robot.framework.CSVLogWriter;
 import frc.robot.framework.ILoop;
 import frc.robot.framework.Looper;
 import frc.robot.framework.Subsystem;
+import frc.robot.framework.SysIdRoutine;
 import frc.robot.subsystems.swerve.SwerveModule;
 import frc.robot.subsystems.swerve.SwerveSetpointGenerator;
 
 /**
  * Drive Subsystem - Swerve Drive Controller.
  *
- * <p>This subsystem manages the complete swerve drive system including:
+ * <p>
+ * This subsystem manages the complete swerve drive system including:
  *
  * <ul>
- *   <li><strong>Kinematics</strong>: Chassis speed ↔ module state conversion
- *   <li><strong>Odometry</strong>: Wheel-based position estimation
- *   <li><strong>Control</strong>: Velocity closed-loop with slip protection
+ * <li><strong>Kinematics</strong>: Chassis speed ↔ module state conversion
+ * <li><strong>Odometry</strong>: Wheel-based position estimation
+ * <li><strong>Control</strong>: Velocity closed-loop with slip protection
  * </ul>
  *
- * <p><strong>State Machine</strong>:
+ * <p>
+ * <strong>State Machine</strong>:
  *
  * <pre>
  * STOP ←──────────────────────────────────────────────┐
@@ -41,8 +46,11 @@ import frc.robot.subsystems.swerve.SwerveSetpointGenerator;
  *   └──→ CALIBRATING (Module offset calibration)  ────┘
  * </pre>
  *
- * <p><strong>Coordinate Frame</strong>: All poses and speeds use the WPILib field coordinate system
- * (origin at field corner, +X toward red alliance, +Y to driver's left, +θ counterclockwise).
+ * <p>
+ * <strong>Coordinate Frame</strong>: All poses and speeds use the WPILib field
+ * coordinate system
+ * (origin at field corner, +X toward red alliance, +Y to driver's left, +θ
+ * counterclockwise).
  *
  * @see SwerveModule
  * @see SwerveSetpointGenerator
@@ -70,7 +78,6 @@ public class Drive extends Subsystem {
   // --- Logic Components ---
   private final SwerveModule[] mModules;
   private final SwerveDriveKinematics mKinematics;
-  private final SwerveDriveOdometry mOdometry;
   private final SwerveSetpointGenerator mSetpointGenerator;
 
   /** Reusable buffer for odometry updates (avoids allocation). */
@@ -93,57 +100,56 @@ public class Drive extends Subsystem {
   }
 
   private DriveState mCurrentState = DriveState.STOP;
-
-  /** Cached desired chassis speeds (set by teleop or path following). */
   private ChassisSpeeds mDesiredChassisSpeeds = new ChassisSpeeds();
+
+  // --- SysId Integration ---
+  private final SysIdRoutine mSysIdRoutine;
+  private boolean mSysIdActive = false;
+  private double mSysIdVoltage = 0.0;
 
   private Drive() {
     mIO = new DriveIOReal();
 
-    mModules =
-        new SwerveModule[] {
-          new SwerveModule(0), new SwerveModule(1), new SwerveModule(2), new SwerveModule(3)
-        };
+    mModules = new SwerveModule[] {
+        new SwerveModule(0), new SwerveModule(1), new SwerveModule(2), new SwerveModule(3)
+    };
 
-    mKinematics =
-        new SwerveDriveKinematics(
-            Constants.Swerve.kFLPos,
-            Constants.Swerve.kFRPos,
-            Constants.Swerve.kBLPos,
-            Constants.Swerve.kBRPos);
-
-    mOdometry =
-        new SwerveDriveOdometry(
-            mKinematics,
-            new Rotation2d(),
-            new SwerveModulePosition[] {
-              new SwerveModulePosition(),
-              new SwerveModulePosition(),
-              new SwerveModulePosition(),
-              new SwerveModulePosition()
-            });
+    mKinematics = new SwerveDriveKinematics(
+        Constants.Swerve.kFLPos,
+        Constants.Swerve.kFRPos,
+        Constants.Swerve.kBLPos,
+        Constants.Swerve.kBRPos);
 
     mSetpointGenerator = new SwerveSetpointGenerator(mKinematics);
-    mModulePositions =
-        new SwerveModulePosition[] {
-          new SwerveModulePosition(),
-          new SwerveModulePosition(),
-          new SwerveModulePosition(),
-          new SwerveModulePosition()
-        };
+    mModulePositions = new SwerveModulePosition[] {
+        new SwerveModulePosition(),
+        new SwerveModulePosition(),
+        new SwerveModulePosition(),
+        new SwerveModulePosition()
+    };
     try {
       Thread.sleep(250);
     } catch (InterruptedException e) {
     }
     mIO.updateInputs(mInputs);
-    zeroSensors();
+
+    mIO.startOdometryThread();
+
+    // Initialize SysId routine for individual drive motors characterized as a
+    // single system
+    mSysIdRoutine = new SysIdRoutine(
+        new SysIdRoutine.Config()
+            .setSubsystemName("Drive")
+            .setRampRate(Units.Volts.of(1.0)) // 1 V/s for quasistatic
+            .setStepVoltage(Units.Volts.of(4.0)) // 4V step for dynamic
+            .setTimeout(Units.Seconds.of(10.0)) // 10s safety timeout
+            .setLogWriter(new CSVLogWriter("sysid_Drive")));
   }
 
   @Override
   public synchronized void readPeriodicInputs() {
     mIO.updateInputs(mInputs);
 
-    // Update odometry with latest wheel positions
     for (int i = 0; i < 4; i++) {
       mModules[i].updatePosition(
           mInputs.drivePositionRotations[i],
@@ -151,17 +157,9 @@ public class Drive extends Subsystem {
           mModulePositions[i]);
     }
 
-    mOdometry.update(mInputs.gyroYaw, mModulePositions);
-
-    // Publish pose to RobotState for vision latency compensation
-    PoseHistory.getInstance()
-        .addFieldToVehicleObservation(mInputs.timestamp, mOdometry.getPoseMeters());
-
-    // Publish velocity to RobotState for shoot-on-move compensation
-    PoseHistory.getInstance().addFieldVelocityObservation(mInputs.timestamp, getFieldVelocity());
-
-    // Publish IMU motion measurements to RobotState (254 pattern)
-    // Centralizes all IMU data flow to avoid duplicate Pigeon2 references
+    // Odometry update, fused pose publication, and velocity publication are all
+    // handled by RobotStateEstimator via the 250Hz OdometrySnapshot thread.
+    // Drive only publishes raw IMU data for impact/slip detection.
     PoseHistory.getInstance()
         .addDriveMotionMeasurements(
             mInputs.timestamp,
@@ -192,7 +190,9 @@ public class Drive extends Subsystem {
         break;
 
       case OPEN_LOOP:
-        // Open-loop voltage control handled externally
+        if (mSysIdActive) {
+          handleSysIdControl();
+        }
         break;
 
       case PATH_FOLLOWING:
@@ -208,18 +208,37 @@ public class Drive extends Subsystem {
   /**
    * Executes velocity closed-loop control for all modules.
    *
-   * <p>Converts chassis speeds → module states → motor commands.
+   * <p>
+   * Converts chassis speeds → module states → motor commands.
    */
   private void handleVelocityControl() {
-    SwerveModuleState[] setpointStates =
-        mSetpointGenerator.generateSetpoint(mDesiredChassisSpeeds, mInputs.driveSupplyVoltage);
+    SwerveModuleState[] setpointStates = mSetpointGenerator.generateSetpoint(mDesiredChassisSpeeds,
+        mInputs.driveSupplyVoltage);
+    mLastSetpointStates = setpointStates;
 
     for (int i = 0; i < 4; i++) {
-      SwerveModule.ModuleIO ioCmd =
-          mModules[i].updateSetpoint(setpointStates[i], mInputs.steerPositionRotations[i], false);
+      SwerveModule.ModuleIO ioCmd = mModules[i].updateSetpoint(setpointStates[i], mInputs.steerPositionRotations[i],
+          false);
 
       mIO.setDriveVelocity(i, ioCmd.driveDemand);
       mIO.setSteerPosition(i, ioCmd.steerDemand);
+    }
+  }
+
+  /**
+   * Executes SysId characterization control.
+   *
+   * <p>
+   * Locks all steer motors to 0 degrees and applies SysId test voltage to all
+   * drive motors.
+   */
+  private void handleSysIdControl() {
+    for (int i = 0; i < 4; i++) {
+      // Apply SysId output to drive motors
+      mIO.setDriveVoltage(i, mSysIdVoltage);
+
+      // Lock modules to 0 degrees (forward) with stiff position control
+      mIO.setSteerPosition(i, 0.0);
     }
   }
 
@@ -232,55 +251,56 @@ public class Drive extends Subsystem {
       Translation2d translation, double rotation, boolean fieldRelative) {
     double vx = translation.getX() * Constants.Swerve.kMaxDriveVelocity * mConstraintSpeedFactor;
     double vy = translation.getY() * Constants.Swerve.kMaxDriveVelocity * mConstraintSpeedFactor;
+
+    if (fieldRelative && frc.robot.util.geometry.AllianceFlipUtil.shouldFlip()) {
+      vx = -vx;
+      vy = -vy;
+    }
+
     double omega = rotation * Constants.Swerve.kMaxAngularVelocity * mConstraintSpeedFactor;
+    double cap = Constants.Swerve.kMaxTeleopAngularVelocity;
+    omega = Math.max(-cap, Math.min(cap, omega));
 
     if (mBorderProtectionEnabled
         && !frc.robot.DashboardState.getInstance().isDriveProtectDisabled()) {
       // 1. Only protect if intake pivot is down AND wheels are spinning
-      boolean intakeActive =
-          frc.robot.GlobalData.pivotWantsDown
-              && (frc.robot.GlobalData.intakeWheelWantedState
-                      == frc.robot.GlobalData.IntakeActiveState.FORWARD
-                  || frc.robot.GlobalData.intakeWheelWantedState
-                      == frc.robot.GlobalData.IntakeActiveState.REVERSE);
+      boolean intakeActive = frc.robot.GlobalData.pivotWantsDown
+          && (frc.robot.GlobalData.intakeWheelWantedState == frc.robot.GlobalData.IntakeActiveState.FORWARD
+              || frc.robot.GlobalData.intakeWheelWantedState == frc.robot.GlobalData.IntakeActiveState.REVERSE);
 
       if (intakeActive) {
         // Compute the field-relative velocity vector
-        double fieldVx =
-            fieldRelative
-                ? vx
-                : vx
-                        * Math.cos(
-                            frc.robot.subsystems.RobotStateEstimator.getInstance()
-                                .getEstimatedPose()
-                                .getRotation()
-                                .getRadians())
-                    - vy
-                        * Math.sin(
-                            frc.robot.subsystems.RobotStateEstimator.getInstance()
-                                .getEstimatedPose()
-                                .getRotation()
-                                .getRadians());
-        double fieldVy =
-            fieldRelative
-                ? vy
-                : vx
-                        * Math.sin(
-                            frc.robot.subsystems.RobotStateEstimator.getInstance()
-                                .getEstimatedPose()
-                                .getRotation()
-                                .getRadians())
-                    + vy
-                        * Math.cos(
-                            frc.robot.subsystems.RobotStateEstimator.getInstance()
-                                .getEstimatedPose()
-                                .getRotation()
-                                .getRadians());
+        double fieldVx = fieldRelative
+            ? vx
+            : vx
+                * Math.cos(
+                    frc.robot.subsystems.RobotStateEstimator.getInstance()
+                        .getEstimatedPose()
+                        .getRotation()
+                        .getRadians())
+                - vy
+                    * Math.sin(
+                        frc.robot.subsystems.RobotStateEstimator.getInstance()
+                            .getEstimatedPose()
+                            .getRotation()
+                            .getRadians());
+        double fieldVy = fieldRelative
+            ? vy
+            : vx
+                * Math.sin(
+                    frc.robot.subsystems.RobotStateEstimator.getInstance()
+                        .getEstimatedPose()
+                        .getRotation()
+                        .getRadians())
+                + vy
+                    * Math.cos(
+                        frc.robot.subsystems.RobotStateEstimator.getInstance()
+                            .getEstimatedPose()
+                            .getRotation()
+                            .getRadians());
 
-        double robotX =
-            frc.robot.subsystems.RobotStateEstimator.getInstance().getEstimatedPose().getX();
-        double robotY =
-            frc.robot.subsystems.RobotStateEstimator.getInstance().getEstimatedPose().getY();
+        double robotX = frc.robot.subsystems.RobotStateEstimator.getInstance().getEstimatedPose().getX();
+        double robotY = frc.robot.subsystems.RobotStateEstimator.getInstance().getEstimatedPose().getY();
 
         // Dynamic Scaling Factor: 1.0 = full speed, 0.0 = full stop
         double dynamicScaleX = 1.0;
@@ -288,116 +308,111 @@ public class Drive extends Subsystem {
 
         // Helper constants for scaling
         final double kDangerZoneRadius = 1.0; // Starts slowing down 1m before collision
-        final double kMaxSlowdownVelocity =
-            2.0; // The threshold velocity (m/s) that leads to max clamping
+        final double kMaxSlowdownVelocity = 2.0; // The threshold velocity (m/s) that leads to max clamping
         final double kAbsoluteMinSpeedClamp = 0.2; // Floor of the speed limiter
 
         // Check 1: Are we driving out of bounds? (Field Edges)
         if (robotX > (frc.robot.FieldConstants.fieldLength - kDangerZoneRadius) && fieldVx > 0) {
           double depth = robotX - (frc.robot.FieldConstants.fieldLength - kDangerZoneRadius);
-          double speedFactor =
-              Math.max(
-                  kAbsoluteMinSpeedClamp,
-                  1.0 - (depth / kDangerZoneRadius) * (fieldVx / kMaxSlowdownVelocity));
+          double speedFactor = Math.max(
+              kAbsoluteMinSpeedClamp,
+              1.0 - (depth / kDangerZoneRadius) * (fieldVx / kMaxSlowdownVelocity));
           dynamicScaleX = Math.min(dynamicScaleX, speedFactor);
         }
         if (robotX < kDangerZoneRadius && fieldVx < 0) {
           double depth = kDangerZoneRadius - robotX;
-          double speedFactor =
-              Math.max(
-                  kAbsoluteMinSpeedClamp,
-                  1.0 - (depth / kDangerZoneRadius) * (Math.abs(fieldVx) / kMaxSlowdownVelocity));
+          double speedFactor = Math.max(
+              kAbsoluteMinSpeedClamp,
+              1.0 - (depth / kDangerZoneRadius) * (Math.abs(fieldVx) / kMaxSlowdownVelocity));
           dynamicScaleX = Math.min(dynamicScaleX, speedFactor);
         }
         if (robotY > (frc.robot.FieldConstants.fieldWidth - kDangerZoneRadius) && fieldVy > 0) {
           double depth = robotY - (frc.robot.FieldConstants.fieldWidth - kDangerZoneRadius);
-          double speedFactor =
-              Math.max(
-                  kAbsoluteMinSpeedClamp,
-                  1.0 - (depth / kDangerZoneRadius) * (fieldVy / kMaxSlowdownVelocity));
+          double speedFactor = Math.max(
+              kAbsoluteMinSpeedClamp,
+              1.0 - (depth / kDangerZoneRadius) * (fieldVy / kMaxSlowdownVelocity));
           dynamicScaleY = Math.min(dynamicScaleY, speedFactor);
         }
         if (robotY < kDangerZoneRadius && fieldVy < 0) {
           double depth = kDangerZoneRadius - robotY;
-          double speedFactor =
-              Math.max(
-                  kAbsoluteMinSpeedClamp,
-                  1.0 - (depth / kDangerZoneRadius) * (Math.abs(fieldVy) / kMaxSlowdownVelocity));
+          double speedFactor = Math.max(
+              kAbsoluteMinSpeedClamp,
+              1.0 - (depth / kDangerZoneRadius) * (Math.abs(fieldVy) / kMaxSlowdownVelocity));
           dynamicScaleY = Math.min(dynamicScaleY, speedFactor);
         }
 
         // Define generic bounding boxes for obstacles [MinX, MaxX, MinY, MaxY]
         // Including Blue and Red side obstacles.
         double[][] obstacleBounds = {
-          // Blue Hub
-          {
-            frc.robot.FieldConstants.Hub.nearLeftCorner.getX(),
-            frc.robot.FieldConstants.Hub.farRightCorner.getX(),
-            frc.robot.FieldConstants.Hub.nearRightCorner.getY(),
-            frc.robot.FieldConstants.Hub.nearLeftCorner.getY()
-          },
-          // Red Hub (Opposing)
-          {
-            frc.robot.FieldConstants.Hub.oppNearRightCorner.getX(),
-            frc.robot.FieldConstants.Hub.oppFarLeftCorner.getX(),
-            frc.robot.FieldConstants.Hub.oppNearRightCorner.getY(),
-            frc.robot.FieldConstants.Hub.oppNearLeftCorner.getY()
-          },
+            // Blue Hub
+            {
+                frc.robot.FieldConstants.Hub.nearLeftCorner.getX(),
+                frc.robot.FieldConstants.Hub.farRightCorner.getX(),
+                frc.robot.FieldConstants.Hub.nearRightCorner.getY(),
+                frc.robot.FieldConstants.Hub.nearLeftCorner.getY()
+            },
+            // Red Hub (Opposing)
+            {
+                frc.robot.FieldConstants.Hub.oppNearRightCorner.getX(),
+                frc.robot.FieldConstants.Hub.oppFarLeftCorner.getX(),
+                frc.robot.FieldConstants.Hub.oppNearRightCorner.getY(),
+                frc.robot.FieldConstants.Hub.oppNearLeftCorner.getY()
+            },
 
-          // Blue Tower
-          {
-            frc.robot.FieldConstants.Tower.frontFaceX - frc.robot.FieldConstants.Tower.depth,
-            frc.robot.FieldConstants.Tower.frontFaceX,
-            frc.robot.FieldConstants.Tower.centerPoint.getY()
-                - frc.robot.FieldConstants.Tower.width / 2.0,
-            frc.robot.FieldConstants.Tower.centerPoint.getY()
-                + frc.robot.FieldConstants.Tower.width / 2.0
-          },
-          // Red Tower
-          {
-            frc.robot.FieldConstants.fieldLength - frc.robot.FieldConstants.Tower.frontFaceX,
-            frc.robot.FieldConstants.fieldLength
-                - frc.robot.FieldConstants.Tower.frontFaceX
-                + frc.robot.FieldConstants.Tower.depth,
-            frc.robot.FieldConstants.Tower.oppCenterPoint.getY()
-                - frc.robot.FieldConstants.Tower.width / 2.0,
-            frc.robot.FieldConstants.Tower.oppCenterPoint.getY()
-                + frc.robot.FieldConstants.Tower.width / 2.0
-          },
+            // Blue Tower
+            {
+                frc.robot.FieldConstants.Tower.frontFaceX - frc.robot.FieldConstants.Tower.depth,
+                frc.robot.FieldConstants.Tower.frontFaceX,
+                frc.robot.FieldConstants.Tower.centerPoint.getY()
+                    - frc.robot.FieldConstants.Tower.width / 2.0,
+                frc.robot.FieldConstants.Tower.centerPoint.getY()
+                    + frc.robot.FieldConstants.Tower.width / 2.0
+            },
+            // Red Tower
+            {
+                frc.robot.FieldConstants.fieldLength - frc.robot.FieldConstants.Tower.frontFaceX,
+                frc.robot.FieldConstants.fieldLength
+                    - frc.robot.FieldConstants.Tower.frontFaceX
+                    + frc.robot.FieldConstants.Tower.depth,
+                frc.robot.FieldConstants.Tower.oppCenterPoint.getY()
+                    - frc.robot.FieldConstants.Tower.width / 2.0,
+                frc.robot.FieldConstants.Tower.oppCenterPoint.getY()
+                    + frc.robot.FieldConstants.Tower.width / 2.0
+            },
 
-          // Blue Left Bump
-          {
-            frc.robot.FieldConstants.LeftBump.nearLeftCorner.getX(),
-            frc.robot.FieldConstants.LeftBump.farRightCorner.getX(),
-            frc.robot.FieldConstants.LeftBump.nearLeftCorner.getY()
-                - frc.robot.FieldConstants.LeftBump.depth,
-            frc.robot.FieldConstants.LeftBump.nearLeftCorner.getY()
-          },
-          // Blue Right Bump
-          {
-            frc.robot.FieldConstants.RightBump.nearLeftCorner.getX(),
-            frc.robot.FieldConstants.RightBump.farRightCorner.getX(),
-            frc.robot.FieldConstants.RightBump.nearLeftCorner.getY()
-                - frc.robot.FieldConstants.RightBump.depth,
-            frc.robot.FieldConstants.RightBump.nearLeftCorner.getY()
-          },
+            // Blue Left Bump
+            {
+                frc.robot.FieldConstants.LeftBump.nearLeftCorner.getX(),
+                frc.robot.FieldConstants.LeftBump.farRightCorner.getX(),
+                frc.robot.FieldConstants.LeftBump.nearLeftCorner.getY()
+                    - frc.robot.FieldConstants.LeftBump.depth,
+                frc.robot.FieldConstants.LeftBump.nearLeftCorner.getY()
+            },
+            // Blue Right Bump
+            {
+                frc.robot.FieldConstants.RightBump.nearLeftCorner.getX(),
+                frc.robot.FieldConstants.RightBump.farRightCorner.getX(),
+                frc.robot.FieldConstants.RightBump.nearLeftCorner.getY()
+                    - frc.robot.FieldConstants.RightBump.depth,
+                frc.robot.FieldConstants.RightBump.nearLeftCorner.getY()
+            },
 
-          // Red Left Bump (Opposing)
-          {
-            frc.robot.FieldConstants.LeftBump.oppNearLeftCorner.getX(),
-            frc.robot.FieldConstants.LeftBump.oppFarRightCorner.getX(),
-            frc.robot.FieldConstants.LeftBump.oppNearLeftCorner.getY()
-                - frc.robot.FieldConstants.LeftBump.depth,
-            frc.robot.FieldConstants.LeftBump.oppNearLeftCorner.getY()
-          },
-          // Red Right Bump (Opposing)
-          {
-            frc.robot.FieldConstants.RightBump.oppNearLeftCorner.getX(),
-            frc.robot.FieldConstants.RightBump.oppFarRightCorner.getX(),
-            frc.robot.FieldConstants.RightBump.oppNearLeftCorner.getY()
-                - frc.robot.FieldConstants.RightBump.depth,
-            frc.robot.FieldConstants.RightBump.oppNearLeftCorner.getY()
-          }
+            // Red Left Bump (Opposing)
+            {
+                frc.robot.FieldConstants.LeftBump.oppNearLeftCorner.getX(),
+                frc.robot.FieldConstants.LeftBump.oppFarRightCorner.getX(),
+                frc.robot.FieldConstants.LeftBump.oppNearLeftCorner.getY()
+                    - frc.robot.FieldConstants.LeftBump.depth,
+                frc.robot.FieldConstants.LeftBump.oppNearLeftCorner.getY()
+            },
+            // Red Right Bump (Opposing)
+            {
+                frc.robot.FieldConstants.RightBump.oppNearLeftCorner.getX(),
+                frc.robot.FieldConstants.RightBump.oppFarRightCorner.getX(),
+                frc.robot.FieldConstants.RightBump.oppNearLeftCorner.getY()
+                    - frc.robot.FieldConstants.RightBump.depth,
+                frc.robot.FieldConstants.RightBump.oppNearLeftCorner.getY()
+            }
         };
 
         for (double[] bound : obstacleBounds) {
@@ -421,38 +436,34 @@ public class Drive extends Subsystem {
             // X-axis interference
             if (robotX < minX && fieldVx > 0) { // Approaching from Left
               double depth = robotX - dangerMinX;
-              double speedFactor =
-                  Math.max(
-                      kAbsoluteMinSpeedClamp,
-                      1.0 - (depth / kDangerZoneRadius) * (fieldVx / kMaxSlowdownVelocity));
+              double speedFactor = Math.max(
+                  kAbsoluteMinSpeedClamp,
+                  1.0 - (depth / kDangerZoneRadius) * (fieldVx / kMaxSlowdownVelocity));
               dynamicScaleX = Math.min(dynamicScaleX, speedFactor);
             } else if (robotX > maxX && fieldVx < 0) { // Approaching from Right
               double depth = dangerMaxX - robotX;
-              double speedFactor =
-                  Math.max(
-                      kAbsoluteMinSpeedClamp,
-                      1.0
-                          - (depth / kDangerZoneRadius)
-                              * (Math.abs(fieldVx) / kMaxSlowdownVelocity));
+              double speedFactor = Math.max(
+                  kAbsoluteMinSpeedClamp,
+                  1.0
+                      - (depth / kDangerZoneRadius)
+                          * (Math.abs(fieldVx) / kMaxSlowdownVelocity));
               dynamicScaleX = Math.min(dynamicScaleX, speedFactor);
             }
 
             // Y-axis interference
             if (robotY < minY && fieldVy > 0) { // Approaching from Bottom
               double depth = robotY - dangerMinY;
-              double speedFactor =
-                  Math.max(
-                      kAbsoluteMinSpeedClamp,
-                      1.0 - (depth / kDangerZoneRadius) * (fieldVy / kMaxSlowdownVelocity));
+              double speedFactor = Math.max(
+                  kAbsoluteMinSpeedClamp,
+                  1.0 - (depth / kDangerZoneRadius) * (fieldVy / kMaxSlowdownVelocity));
               dynamicScaleY = Math.min(dynamicScaleY, speedFactor);
             } else if (robotY > maxY && fieldVy < 0) { // Approaching from Top
               double depth = dangerMaxY - robotY;
-              double speedFactor =
-                  Math.max(
-                      kAbsoluteMinSpeedClamp,
-                      1.0
-                          - (depth / kDangerZoneRadius)
-                              * (Math.abs(fieldVy) / kMaxSlowdownVelocity));
+              double speedFactor = Math.max(
+                  kAbsoluteMinSpeedClamp,
+                  1.0
+                      - (depth / kDangerZoneRadius)
+                          * (Math.abs(fieldVy) / kMaxSlowdownVelocity));
               dynamicScaleY = Math.min(dynamicScaleY, speedFactor);
             }
           }
@@ -464,10 +475,8 @@ public class Drive extends Subsystem {
     }
 
     if (fieldRelative) {
-      Rotation2d fieldHeading = mOdometry.getPoseMeters().getRotation();
-      // Reuse existing object to avoid allocation in hot path
-      ChassisSpeeds fieldSpeeds =
-          ChassisSpeeds.fromFieldRelativeSpeeds(vx, vy, omega, fieldHeading);
+      Rotation2d fieldHeading = getEstimatedHeading();
+      ChassisSpeeds fieldSpeeds = ChassisSpeeds.fromFieldRelativeSpeeds(vx, vy, omega, fieldHeading);
 
       // FIX: Do not overwrite trajectory commands if we are in PATH_FOLLOWING mode
       if (mCurrentState != DriveState.PATH_FOLLOWING) {
@@ -496,7 +505,8 @@ public class Drive extends Subsystem {
   /**
    * Sets chassis speeds for path following.
    *
-   * <p>Only applies if currently in PATH_FOLLOWING state.
+   * <p>
+   * Only applies if currently in PATH_FOLLOWING state.
    *
    * @param speeds Robot-relative chassis speeds from trajectory follower.
    */
@@ -509,39 +519,28 @@ public class Drive extends Subsystem {
   /**
    * Resets odometry to a known pose.
    *
-   * <p>This method should be called when the robot's absolute position is known (e.g., from vision
+   * <p>
+   * This method should be called when the robot's absolute position is known
+   * (e.g., from vision
    * or at match start).
    *
    * @param pose The new robot pose in field coordinates.
    */
   public synchronized void resetOdometry(Pose2d pose) {
-    // FIX: Do NOT set hardware gyro here. CTRE/Pigeon setYaw has latency
-    // (~10-20ms).
-    // If we setYaw(0) and immediately read gyro, we get the OLD value (e.g. 45).
-    // The odometry would then calculate Offset = 0 - 45 = -45.
-    // When gyro eventually updates to 0, Odometry sees 0 - 45 = -45, causing
-    // rotation.
-
-    // Instead, we use the CURRENT gyro reading and tell Odometry "This reading
-    // corresponds to Pose
-    // X".
-    // Odometry calculates the offset instantly: Offset = TargetRot - CurrentGyro.
-    mOdometry.resetPosition(mInputs.gyroYaw, mModulePositions, pose);
-
-    // Sync RobotStateEstimator to default/vision pose
-    // This prevents the two estimators from permanently diverging
-    // Only call if RobotStateEstimator is initialized to prevent circular
-    // dependency during startup
     if (frc.robot.subsystems.RobotStateEstimator.hasInstance()) {
       frc.robot.subsystems.RobotStateEstimator.getInstance().resetPose(pose);
     }
   }
 
   /**
-   * Sets the gyroscope yaw to a field-relative heading (Orbit2: reset gyro when close/trusted).
+   * Sets the gyroscope yaw to a field-relative heading (Orbit2: reset gyro when
+   * close/trusted).
    *
-   * <p>Call only when vision heading is trusted (e.g. close range or multi-tag). Pigeon has ~10–20
-   * ms latency; avoid calling every cycle. Odometry is not reset here; the estimator will fuse
+   * <p>
+   * Call only when vision heading is trusted (e.g. close range or multi-tag).
+   * Pigeon has ~10–20
+   * ms latency; avoid calling every cycle. Odometry is not reset here; the
+   * estimator will fuse
    * subsequent vision/odometry.
    *
    * @param fieldYawDegrees Desired robot heading in field frame (degrees).
@@ -551,26 +550,24 @@ public class Drive extends Subsystem {
   }
 
   /**
-   * Returns the current robot pose from odometry.
-   *
-   * <p>Historically "FusedPose" meant ESUKF fusion. Now simplified to pure odometry. Kept for API
-   * compatibility.
+   * Returns the EKF-fused robot pose from RobotStateEstimator.
    *
    * @return The robot pose in field coordinates.
    */
   public synchronized Pose2d getFusedPose() {
-    return mOdometry.getPoseMeters();
+    if (frc.robot.subsystems.RobotStateEstimator.hasInstance()) {
+      return frc.robot.subsystems.RobotStateEstimator.getInstance().getEstimatedPose();
+    }
+    return new Pose2d();
   }
 
   /**
-   * Returns the raw odometry pose (before ESUKF fusion).
+   * Returns the EKF-fused robot pose (same as getFusedPose after unification).
    *
-   * <p>Useful for debugging to compare against fused pose.
-   *
-   * @return The raw wheel odometry pose.
+   * @return The robot pose in field coordinates.
    */
   public synchronized Pose2d getOdometryPose() {
-    return mOdometry.getPoseMeters();
+    return getFusedPose();
   }
 
   /**
@@ -584,13 +581,15 @@ public class Drive extends Subsystem {
 
   // --- Calibration API ---
 
-  private static final String[] MODULE_NAMES = {"FL", "FR", "BL", "BR"};
+  private static final String[] MODULE_NAMES = { "FL", "FR", "BL", "BR" };
   private boolean mCalibrationExecuted = false;
 
   /**
    * Initiates swerve module offset calibration.
    *
-   * <p><strong>Precondition</strong>: All wheels must be manually aligned to 0 degrees (straight
+   * <p>
+   * <strong>Precondition</strong>: All wheels must be manually aligned to 0
+   * degrees (straight
    * forward) before calling this method.
    */
   public synchronized void startCalibration() {
@@ -601,10 +600,14 @@ public class Drive extends Subsystem {
   /**
    * Executes calibration outside the normal state machine.
    *
-   * <p>Called directly from Test Mode where writePeriodicOutputs is bypassed. Reads CANcoder
-   * positions, computes offsets, applies them, and plays an audible confirmation tone.
+   * <p>
+   * Called directly from Test Mode where writePeriodicOutputs is bypassed. Reads
+   * CANcoder
+   * positions, computes offsets, applies them, and plays an audible confirmation
+   * tone.
    *
-   * <p><strong>Offset Calculation</strong>:
+   * <p>
+   * <strong>Offset Calculation</strong>:
    *
    * <pre>
    * Given: A = current absolute position (with old offset)
@@ -624,8 +627,10 @@ public class Drive extends Subsystem {
       newOffsets[i] = currentOffsets[i] - absolutePositions[i];
 
       // Normalize to [-0.5, 0.5] rotations
-      while (newOffsets[i] > 0.5) newOffsets[i] -= 1.0;
-      while (newOffsets[i] < -0.5) newOffsets[i] += 1.0;
+      while (newOffsets[i] > 0.5)
+        newOffsets[i] -= 1.0;
+      while (newOffsets[i] < -0.5)
+        newOffsets[i] += 1.0;
     }
 
     for (int i = 0; i < 4; i++) {
@@ -639,15 +644,15 @@ public class Drive extends Subsystem {
 
     // Stop tone after 500ms (non-blocking)
     new Thread(
-            () -> {
-              try {
-                Thread.sleep(500);
-              } catch (InterruptedException ignored) {
-              }
-              synchronized (Drive.this) {
-                mIO.playTone(0);
-              }
-            })
+        () -> {
+          try {
+            Thread.sleep(500);
+          } catch (InterruptedException ignored) {
+          }
+          synchronized (Drive.this) {
+            mIO.playTone(0);
+          }
+        })
         .start();
   }
 
@@ -707,11 +712,15 @@ public class Drive extends Subsystem {
   /**
    * Stops all motors using OPEN_LOOP state.
    *
-   * <p>Unlike stop() which uses STOP state (still runs velocity control in writePeriodicOutputs),
-   * this method uses OPEN_LOOP which does NOT apply any control, allowing external voltage settings
+   * <p>
+   * Unlike stop() which uses STOP state (still runs velocity control in
+   * writePeriodicOutputs),
+   * this method uses OPEN_LOOP which does NOT apply any control, allowing
+   * external voltage settings
    * to persist without being overwritten.
    *
-   * <p>Use this in Test Mode to prevent PID from fighting manual wheel alignment.
+   * <p>
+   * Use this in Test Mode to prevent PID from fighting manual wheel alignment.
    */
   public synchronized void stopOpenLoop() {
     mCurrentState = DriveState.OPEN_LOOP;
@@ -721,10 +730,72 @@ public class Drive extends Subsystem {
     }
   }
 
+  // --- SysId API (Test Mode Only) ---
+
+  /**
+   * Starts a SysId characterization test.
+   *
+   * @param type      Test type (QUASISTATIC or DYNAMIC).
+   * @param direction Test direction (FORWARD or REVERSE).
+   */
+  public void startSysId(SysIdRoutine.TestType type, SysIdRoutine.Direction direction) {
+    mSysIdActive = true;
+    mCurrentState = DriveState.OPEN_LOOP;
+    mSysIdRoutine.start(type, direction);
+  }
+
+  /** Stops the active SysId test and saves data to CSV. */
+  public void stopSysId() {
+    if (mSysIdActive) {
+      mSysIdRoutine.stop();
+      mSysIdActive = false;
+      mSysIdVoltage = 0.0;
+      stop();
+    }
+  }
+
+  /**
+   * Updates the SysId routine and applies the calculated voltage.
+   *
+   * <p>
+   * Note: We use average position and velocity of all 4 drive wheels for more
+   * stable
+   * characterization of the chassis assembly.
+   */
+  public void updateSysId() {
+    if (mSysIdActive) {
+      double timestamp = Timer.getFPGATimestamp();
+
+      // Average positions and velocities from all 4 modules
+      double avgPos = 0.0;
+      double avgVel = 0.0;
+      for (int i = 0; i < 4; i++) {
+        avgPos += mInputs.drivePositionRotations[i];
+        avgVel += mInputs.driveVelocityRotationsPerSec[i];
+      }
+      avgPos /= 4.0;
+      avgVel /= 4.0;
+
+      mSysIdRoutine.update(timestamp, avgPos, avgVel);
+      mSysIdVoltage = mSysIdRoutine.getOutputVoltage();
+    }
+  }
+
+  /**
+   * Checks if a SysId test is currently running.
+   *
+   * @return True if SysId is active.
+   */
+  public boolean isSysIdActive() {
+    return mSysIdActive;
+  }
+
   /**
    * Sets the drive state to OPEN_LOOP without modifying motor outputs.
    *
-   * <p>Use this before calling setAllDriveMotorsDutyCycle() to prevent writePeriodicOutputs from
+   * <p>
+   * Use this before calling setAllDriveMotorsDutyCycle() to prevent
+   * writePeriodicOutputs from
    * overwriting external voltage control.
    */
   public synchronized void setOpenLoopState() {
@@ -742,14 +813,15 @@ public class Drive extends Subsystem {
 
   @Override
   public void zeroSensors() {
-    resetOdometry(new Pose2d());
+    if (frc.robot.subsystems.RobotStateEstimator.hasInstance()) {
+      frc.robot.subsystems.RobotStateEstimator.getInstance().resetPose(new Pose2d());
+    }
   }
 
   public synchronized SwerveModulePosition[] getModulePositions() {
     for (int i = 0; i < 4; i++) {
-      mModulePositions[i] =
-          mModules[i].getPosition(
-              mInputs.drivePositionRotations[i], mInputs.steerPositionRotations[i]);
+      mModulePositions[i] = mModules[i].getPosition(
+          mInputs.drivePositionRotations[i], mInputs.steerPositionRotations[i]);
     }
     return mModulePositions;
   }
@@ -757,20 +829,28 @@ public class Drive extends Subsystem {
   public synchronized SwerveModuleState[] getModuleStates() {
     SwerveModuleState[] states = new SwerveModuleState[4];
     for (int i = 0; i < 4; i++) {
-      states[i] =
-          mModules[i].getState(
-              mInputs.driveVelocityRotationsPerSec[i], mInputs.steerPositionRotations[i]);
+      states[i] = mModules[i].getState(
+          mInputs.driveVelocityRotationsPerSec[i], mInputs.steerPositionRotations[i]);
     }
     return states;
+  }
+
+  public SwerveModuleState[] getSetpointStates() {
+    return mLastSetpointStates;
   }
 
   /**
    * Returns the robot-relative velocity computed from wheel odometry.
    *
-   * <p>Uses inverse kinematics to convert individual module states (wheel velocities) back to
-   * chassis speeds. This represents the robot's velocity in its own reference frame.
+   * <p>
+   * Uses inverse kinematics to convert individual module states (wheel
+   * velocities) back to
+   * chassis speeds. This represents the robot's velocity in its own reference
+   * frame.
    *
-   * <p><strong>Coordinate Frame</strong>: Robot-relative (+X forward, +Y left, +ω CCW).
+   * <p>
+   * <strong>Coordinate Frame</strong>: Robot-relative (+X forward, +Y left, +ω
+   * CCW).
    *
    * @return The robot-relative velocity as ChassisSpeeds.
    */
@@ -781,19 +861,49 @@ public class Drive extends Subsystem {
   /**
    * Returns the field-relative velocity computed from wheel odometry.
    *
-   * <p>Transforms the robot-relative velocity to the field coordinate system using the current
-   * heading from odometry. This is required for shoot-on-move calculations where the projectile
+   * <p>
+   * Transforms the robot-relative velocity to the field coordinate system using
+   * the current
+   * heading from odometry. This is required for shoot-on-move calculations where
+   * the projectile
    * inherits the robot's inertial (field-relative) velocity at launch.
    *
-   * <p><strong>Physics Note</strong>: Field-relative velocity is used because the game piece's
+   * <p>
+   * <strong>Physics Note</strong>: Field-relative velocity is used because the
+   * game piece's
    * trajectory is governed by Newton's first law in the inertial (field) frame.
    *
    * @return The field-relative velocity as ChassisSpeeds.
    */
   public synchronized ChassisSpeeds getFieldVelocity() {
     ChassisSpeeds robotRelative = getRobotVelocity();
-    return ChassisSpeeds.fromRobotRelativeSpeeds(
-        robotRelative, mOdometry.getPoseMeters().getRotation());
+    return ChassisSpeeds.fromRobotRelativeSpeeds(robotRelative, getEstimatedHeading());
+  }
+
+  /**
+   * Returns the best available heading: EKF-fused if available, raw gyro as
+   * fallback.
+   *
+   * <p>
+   * Used for field-relative control and velocity rotation. The EKF heading
+   * includes vision
+   * corrections; the raw gyro is used only during early initialization before RSE
+   * exists.
+   */
+  private Rotation2d getEstimatedHeading() {
+    if (frc.robot.subsystems.RobotStateEstimator.hasInstance()) {
+      return frc.robot.subsystems.RobotStateEstimator.getInstance()
+          .getEstimatedPose()
+          .getRotation();
+    }
+    return mInputs.gyroYaw;
+  }
+
+  /**
+   * Exposes the IO layer for the 250Hz odometry thread in RobotStateEstimator.
+   */
+  public DriveIO getIO() {
+    return mIO;
   }
 
   public SwerveDriveKinematics getKinematics() {
@@ -835,6 +945,10 @@ public class Drive extends Subsystem {
     setTeleopInputs(control.getTranslation(), control.getRotation(), true);
   }
 
+  public void scoreLockedOperate() {
+    scoreOperate();
+  }
+
   @Override
   public void passOperate() {
     if (mCurrentState == DriveState.PATH_FOLLOWING) {
@@ -872,10 +986,12 @@ public class Drive extends Subsystem {
   /** Test routine selector for Drive. */
   public enum DriveTestRoutine {
     SWERVE_CALIBRATION,
-    DRIVE_DIRECTION_TEST
+    DRIVE_DIRECTION_TEST,
+    SYSID
   }
 
-  private DriveTestRoutine mDriveTestRoutine = DriveTestRoutine.SWERVE_CALIBRATION;
+  private DriveTestRoutine mDriveTestRoutine = DriveTestRoutine.DRIVE_DIRECTION_TEST;
+  private boolean mDriveSysIdButtonWasPressed = false;
 
   @Override
   public void handleTestMode(frc.robot.ControlBoard control) {
@@ -892,6 +1008,30 @@ public class Drive extends Subsystem {
       case DRIVE_DIRECTION_TEST -> {
         setOpenLoopState();
         setAllDriveMotorsDutyCycle(0.1);
+      }
+      case SYSID -> {
+        boolean anySysIdButtonPressed = control.getTriangleButton() || control.getSquareButton()
+            || control.getCrossButton();
+        boolean circlePressed = control.getCircleButton();
+
+        if (!isSysIdActive()) {
+          if (control.getTriangleButton()) {
+            startSysId(SysIdRoutine.TestType.QUASISTATIC, SysIdRoutine.Direction.FORWARD);
+          } else if (control.getSquareButton()) {
+            startSysId(SysIdRoutine.TestType.QUASISTATIC, SysIdRoutine.Direction.REVERSE);
+          } else if (control.getCrossButton()) {
+            startSysId(SysIdRoutine.TestType.DYNAMIC, SysIdRoutine.Direction.FORWARD);
+          } else if (circlePressed) {
+            startSysId(SysIdRoutine.TestType.DYNAMIC, SysIdRoutine.Direction.REVERSE);
+          }
+        }
+
+        updateSysId();
+
+        if (mDriveSysIdButtonWasPressed && !anySysIdButtonPressed && !circlePressed) {
+          stopSysId();
+        }
+        mDriveSysIdButtonWasPressed = anySysIdButtonPressed || circlePressed;
       }
     }
   }
@@ -920,7 +1060,8 @@ public class Drive extends Subsystem {
           }
 
           @Override
-          public void onLoop(double timestamp) {}
+          public void onLoop(double timestamp) {
+          }
 
           @Override
           public void onStop(double timestamp) {
@@ -931,22 +1072,20 @@ public class Drive extends Subsystem {
 
   // --- Telemetry ---
 
-  private SwerveModuleState[] mDesiredModuleStates =
-      new SwerveModuleState[] {
-        new SwerveModuleState(),
-        new SwerveModuleState(),
-        new SwerveModuleState(),
-        new SwerveModuleState()
-      };
+  private SwerveModuleState[] mDesiredModuleStates = new SwerveModuleState[] {
+      new SwerveModuleState(),
+      new SwerveModuleState(),
+      new SwerveModuleState(),
+      new SwerveModuleState()
+  };
 
   /** Cached setpoint states for diagnostics (updated during velocity control). */
-  private SwerveModuleState[] mLastSetpointStates =
-      new SwerveModuleState[] {
-        new SwerveModuleState(),
-        new SwerveModuleState(),
-        new SwerveModuleState(),
-        new SwerveModuleState()
-      };
+  private SwerveModuleState[] mLastSetpointStates = new SwerveModuleState[] {
+      new SwerveModuleState(),
+      new SwerveModuleState(),
+      new SwerveModuleState(),
+      new SwerveModuleState()
+  };
 
   @Override
   public synchronized boolean checkConnectionActive() {
@@ -1005,11 +1144,10 @@ public class Drive extends Subsystem {
 
   @Override
   public void outputTelemetry() {
-    frc.robot.DashboardState.getInstance().driveOK =
-        checkConnectionPassive() && checkSanityPassive();
+    frc.robot.DashboardState.getInstance().driveOK = checkConnectionPassive() && checkSanityPassive();
     var dashboard = frc.robot.DashboardState.getInstance();
     // dashboard.robotPose = getFusedPose();
-    dashboard.robotSlipping = !checkSanityPassive();
+    // dashboard.robotSlipping removed as no longer in DashboardState
 
     // Debugging Telemetry
     edu.wpi.first.wpilibj.smartdashboard.SmartDashboard.putNumber(
@@ -1029,7 +1167,9 @@ public class Drive extends Subsystem {
   /**
    * Publishes Swerve control error diagnostics.
    *
-   * <p>Called during Test Mode to provide real-time feedback for PID tuning. Output is written to
+   * <p>
+   * Called during Test Mode to provide real-time feedback for PID tuning. Output
+   * is written to
    * DashboardState fields.
    */
   public synchronized void publishTestDiagnostics() {
@@ -1039,25 +1179,27 @@ public class Drive extends Subsystem {
   /**
    * Runs a Swerve test with a specified chassis speed and publishes diagnostics.
    *
-   * <p>This method sets the desired chassis speeds and caches the setpoint states for error
+   * <p>
+   * This method sets the desired chassis speeds and caches the setpoint states
+   * for error
    * calculation.
    *
-   * @param vx Forward velocity in m/s (robot-relative).
-   * @param vy Strafe velocity in m/s (robot-relative).
+   * @param vx    Forward velocity in m/s (robot-relative).
+   * @param vy    Strafe velocity in m/s (robot-relative).
    * @param omega Angular velocity in rad/s.
    */
   public synchronized void runDiagnosticDrive(double vx, double vy, double omega) {
     mDesiredChassisSpeeds.vxMetersPerSecond = vx;
     mDesiredChassisSpeeds.vyMetersPerSecond = vy;
     mDesiredChassisSpeeds.omegaRadiansPerSecond = omega;
-    SwerveModuleState[] setpointStates =
-        mSetpointGenerator.generateSetpoint(mDesiredChassisSpeeds, mInputs.driveSupplyVoltage);
+    SwerveModuleState[] setpointStates = mSetpointGenerator.generateSetpoint(mDesiredChassisSpeeds,
+        mInputs.driveSupplyVoltage);
 
     for (int i = 0; i < 4; i++) {
       mLastSetpointStates[i] = setpointStates[i];
 
-      SwerveModule.ModuleIO ioCmd =
-          mModules[i].updateSetpoint(setpointStates[i], mInputs.steerPositionRotations[i], false);
+      SwerveModule.ModuleIO ioCmd = mModules[i].updateSetpoint(setpointStates[i], mInputs.steerPositionRotations[i],
+          false);
 
       mIO.setDriveVelocity(i, ioCmd.driveDemand);
       mIO.setSteerPosition(i, ioCmd.steerDemand);
@@ -1069,7 +1211,8 @@ public class Drive extends Subsystem {
   /**
    * Forces all modules to a specific state (testing only).
    *
-   * <p>Bypasses normal kinematic optimization for offset/PID verification.
+   * <p>
+   * Bypasses normal kinematic optimization for offset/PID verification.
    *
    * @param targetState The state to apply to all modules.
    */
@@ -1079,8 +1222,7 @@ public class Drive extends Subsystem {
     for (int i = 0; i < 4; i++) {
       mDesiredModuleStates[i] = targetState;
 
-      SwerveModule.ModuleIO ioCmd =
-          mModules[i].updateSetpoint(targetState, mInputs.steerPositionRotations[i], false);
+      SwerveModule.ModuleIO ioCmd = mModules[i].updateSetpoint(targetState, mInputs.steerPositionRotations[i], false);
 
       mIO.setDriveVelocity(i, ioCmd.driveDemand);
       mIO.setSteerPosition(i, ioCmd.steerDemand);

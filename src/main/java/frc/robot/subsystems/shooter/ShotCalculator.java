@@ -3,8 +3,8 @@ package frc.robot.subsystems.shooter;
 import edu.wpi.first.math.filter.LinearFilter;
 import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.math.kinematics.ChassisSpeeds;
-import edu.wpi.first.math.util.Units;
 import frc.robot.Constants;
+import frc.robot.GlobalData;
 import frc.robot.PoseHistory;
 
 /**
@@ -45,44 +45,66 @@ public class ShotCalculator {
 
   // --- Velocity Filters ---
   private final LinearFilter mHoodAngleFilter;
+  private final LinearFilter mTurretVelocityFilter;
 
   // --- State Tracking (primitives, no Rotation2d to avoid GC) ---
   private double mLastHoodAngleRad = Double.NaN;
+  private double mLastTurretAngleRad = Double.NaN;
 
   // --- Cached Output ---
   private final ShootingParameters mCachedParameters = new ShootingParameters();
   private boolean mIsCached = false;
+  private TargetType mCachedTargetType = TargetType.HUB;
+  private TargetType mLastTargetType = TargetType.HUB;
+
+  /** Target selection for calculation. */
+  public enum TargetType {
+    /** Main goal (Hub/Speaker). */
+    HUB,
+    /** Passing target (Human Player / Amp zone). */
+    PASS
+  }
 
   public static class ShootingParameters {
     public boolean isValid;
+    public boolean hasTarget;
     public boolean isPassing;
     public double turretAngleRad;
+    public double turretVelocityRadPerSec;
     public double hoodAngleRad;
     public double hoodVelocityRadPerSec;
     public double flywheelSpeedRotPerSec;
     public double effectiveDistanceMeters;
+    public double descentAngleRads;
 
     public void update(
         boolean isValid,
+        boolean hasTarget,
         boolean isPassing,
         double turretAngleRad,
+        double turretVelocityRadPerSec,
         double hoodAngleRad,
         double hoodVelocityRadPerSec,
         double flywheelSpeedRotPerSec,
-        double effectiveDistanceMeters) {
+        double effectiveDistanceMeters,
+        double descentAngleRads) {
       this.isValid = isValid;
+      this.hasTarget = hasTarget;
       this.isPassing = isPassing;
       this.turretAngleRad = turretAngleRad;
+      this.turretVelocityRadPerSec = turretVelocityRadPerSec;
       this.hoodAngleRad = hoodAngleRad;
       this.hoodVelocityRadPerSec = hoodVelocityRadPerSec;
       this.flywheelSpeedRotPerSec = flywheelSpeedRotPerSec;
       this.effectiveDistanceMeters = effectiveDistanceMeters;
+      this.descentAngleRads = descentAngleRads;
     }
   }
 
   private ShotCalculator() {
     int filterTaps = (int) (Constants.Shot.kVelocityFilterWindowSeconds / Constants.kLooperDt);
     mHoodAngleFilter = LinearFilter.movingAverage(filterTaps);
+    mTurretVelocityFilter = LinearFilter.movingAverage(filterTaps);
   }
 
   /** Convergence tolerance for the [LEGACY] iterative ToF solver [m]. */
@@ -95,29 +117,93 @@ public class ShotCalculator {
   /**
    * Computes shooting parameters for the current robot state.
    *
+   * @return The computed shooting parameters for the default target (HUB).
+   * @see #calculate(TargetType)
+   */
+  public ShootingParameters calculate() {
+    // 💡 Priority 1: Use actual robot state if user is holding a button
+    if (GlobalData.robotState == frc.robot.RobotState.PASS) {
+      mLastTargetType = TargetType.PASS;
+      return calculate(TargetType.PASS);
+    }
+    if (GlobalData.robotState == frc.robot.RobotState.SCORE) {
+      mLastTargetType = TargetType.HUB;
+      return calculate(TargetType.HUB);
+    }
+
+    // 💡 Priority 2: Determine default target type based on field position (For
+    // pre-aiming)
+    Pose2d rawPose;
+    if (frc.robot.subsystems.RobotStateEstimator.hasInstance()) {
+      rawPose = frc.robot.subsystems.RobotStateEstimator.getInstance().getEstimatedPose();
+    } else {
+      rawPose = PoseHistory.getInstance().getLatestFieldToVehicle();
+    }
+
+    // Use turret field position (not robot center) for hub line check.
+    // The ball exits from the turret, so the turret's X coordinate determines
+    // whether we are in the scoring zone or the passing zone.
+    double poseTheta = rawPose.getRotation().getRadians();
+    double rtX = Constants.Shot.kRobotToTurret.getX();
+    double rtY = Constants.Shot.kRobotToTurret.getY();
+    double turretFieldX = rawPose.getX() + rtX * Math.cos(poseTheta) - rtY * Math.sin(poseTheta);
+
+    boolean isRed = frc.robot.util.geometry.AllianceFlipUtil.shouldFlip();
+    double flippedX = isRed ? frc.robot.FieldConstants.fieldLength - turretFieldX : turretFieldX;
+
+    // 💡 [Aerospace Rigor] Hysteresis to prevent target flickering near the Hub
+    // Use the Hub center line for the switch point (MA 6328 Strategy)
+    double hubLine = frc.robot.FieldConstants.LinesVertical.hubCenter;
+    double buffer = 0.25; // 25cm hysteresis zone
+
+    TargetType target;
+    if (mLastTargetType == TargetType.HUB) {
+      target = (flippedX > hubLine + buffer) ? TargetType.PASS : TargetType.HUB;
+    } else {
+      target = (flippedX < hubLine - buffer) ? TargetType.HUB : TargetType.PASS;
+    }
+    mLastTargetType = target;
+
+    return calculate(target);
+  }
+
+  /**
+   * Computes shooting parameters for the specified target.
+   *
    * <p><strong>Zero-GC</strong>: This method allocates no heap objects in the hot path. All
    * geometry is computed with primitive {@code double} values.
    *
-   * <p>Memoized per cycle. Call {@link #clearCache()} at the start of each control cycle.
+   * <p>Memoized per target type per cycle.
    *
-   * @return The computed shooting parameters (check {@code isValid()} before using).
+   * @param targetType The target to aim for.
+   * @return The computed shooting parameters.
    */
-  public synchronized ShootingParameters calculate() {
-    if (mIsCached) {
+  public synchronized ShootingParameters calculate(TargetType targetType) {
+    if (mIsCached && mCachedTargetType == targetType) {
       return mCachedParameters;
     }
+    mCachedTargetType = targetType;
 
     // Apply strict Point Shoot override
     if (frc.robot.DashboardState.getInstance().isPointShootDisabled()) {
       double minD = frc.robot.subsystems.shooter.ShotTables.MIN_DISTANCE_M;
+      double tof = frc.robot.subsystems.shooter.ShotTables.timeOfFlightS(minD);
+      double deltaH = 1.83 - frc.robot.Constants.Shot.kShooterHeightMeters;
+      double vzf = (deltaH / tof) - 0.5 * 9.81 * tof;
+      double vxy = minD / tof;
+      double descentAngleRads = Math.atan2(Math.abs(vzf), vxy);
+
       mCachedParameters.update(
           true, // isValid
+          true, // hasTarget
           false, // isPassing
           0.0, // turretAngleRad (fixed straight ahead)
+          0.0, // turretVelocityRadPerSec
           frc.robot.subsystems.shooter.ShotTables.hoodAngleRad(minD),
           0.0, // hoodVelocity
           frc.robot.subsystems.shooter.ShotTables.flywheelSpeedRotPerSec(minD),
-          minD);
+          minD,
+          descentAngleRads);
       mIsCached = true;
       return mCachedParameters;
     }
@@ -136,7 +222,11 @@ public class ShotCalculator {
     // Extract to primitives -- all subsequent math is allocation-free
     double poseX = rawPose.getX();
     double poseY = rawPose.getY();
+
+    // Use pose rotation (which is now strictly synced to gyro in
+    // RobotStateEstimator)
     double poseTheta = rawPose.getRotation().getRadians();
+
     double vx = vel.vxMetersPerSecond;
     double vy = vel.vyMetersPerSecond;
     double omega = vel.omegaRadiansPerSecond;
@@ -186,7 +276,7 @@ public class ShotCalculator {
             && flippedY <= frc.robot.FieldConstants.LinesHorizontal.leftBumpEnd;
     boolean inBadBox = insideTower || behindNearHub || behindFarHub;
 
-    boolean isPassing = flippedX > frc.robot.FieldConstants.LinesVertical.hubCenter;
+    boolean isPassing = (targetType == TargetType.PASS);
 
     // ── Step 5: Get target position ──
     double targetX;
@@ -198,11 +288,14 @@ public class ShotCalculator {
       // org.littletonrobotics.frc2026.subsystems.launcher.LaunchCalculator.getPassingTarget()
 
       // Constants defined directly for zero-GC lookup
-      double trackWidthY = Units.inchesToMeters(20.75); // from DriveConstants Swerve.kTrackWidth
+      double trackWidthY =
+          edu.wpi.first.math.util.Units.inchesToMeters(20.75); // from DriveConstants
+      // Swerve.kTrackWidth
       double rightBumpStart = frc.robot.FieldConstants.LinesHorizontal.rightBumpStart;
       double hubPassLine = rightBumpStart - (trackWidthY / 2.0);
-      double xPassTarget = Units.inchesToMeters(25.0);
-      double yPassTarget = Units.inchesToMeters(50.0);
+
+      double xPassTarget = 2.108;
+      double yPassTarget = 2.168;
       double minPassingDistance = ShotTables.MIN_PASSING_DISTANCE_M;
 
       boolean mirror = flippedY > frc.robot.FieldConstants.LinesHorizontal.center;
@@ -266,17 +359,21 @@ public class ShotCalculator {
             isPassing
                 ? ShotTables.passingTimeOfFlightS(lookaheadDist)
                 : ShotTables.timeOfFlightS(lookaheadDist);
-        double offsetX = effVelX * tof;
-        double offsetY = effVelY * tof;
+        double targetOffsetX = effVelX * tof;
+        double targetOffsetY = effVelY * tof;
 
-        // Virtual lookahead position of the turret
-        lookaheadX = turretX + offsetX;
-        lookaheadY = turretY + offsetY;
+        // 💡 [Aerospace Rigor] Numerical Damping for Stability
+        // Long-range passing shots (TOF > 2s) create a positive feedback loop:
+        // higher dist -> higher TOF -> higher offset -> higher dist.
+        // We damp the update by 50% to ensure convergence (Banach Fixed-Point).
+        double damping = isPassing ? 0.5 : 1.0;
+        lookaheadX = lookaheadX + (turretX + targetOffsetX - lookaheadX) * damping;
+        lookaheadY = lookaheadY + (turretY + targetOffsetY - lookaheadY) * damping;
 
-        // Update distance from the LOOKAHEAD position to target
+        // Update distance from the DAMPED LOOKAHEAD position to target
         lookaheadDist = Math.hypot(targetX - lookaheadX, targetY - lookaheadY);
 
-        // Dynamic Break: Banach Fixed-Point early convergence (< 1mm tolerance)
+        // Dynamic Break: Convergence check (< 1mm tolerance)
         if (Math.abs(lookaheadDist - previousLookaheadDist) < 0.001) {
           break;
         }
@@ -289,48 +386,27 @@ public class ShotCalculator {
       turretAngleRad = Math.atan2(dy, dx);
     }
 
-    // ── [Fix] True Vector Separation Control: Radial Effective Distance ──
-    // Calculate the projection of the robot's velocity purely along the axis to the
-    // target.
-    // dxInitial = target - turret, so positive dot product means moving TOWARDS
-    // target.
-    double dxInitial = targetX - turretX;
-    double dyInitial = targetY - turretY;
-    double radialVelocity = (dxInitial * turretVelX + dyInitial * turretVelY) / initialDist;
-
-    // Retrieve a base Time of Flight for the interpolation using the raw physical
-    // distance
-    double baseToF =
+    // ── [Fix] True 3D Lookahead Distance for Kinematics Compensation ──
+    // Aerodynamic calculations necessitate the true hypotenuse lookahead distance
+    // to account for the lateral travel in the 3D parabolic trajectory.
+    // Passing table domain [2.0, 12.0]m differs from HUB [0.5, 6.5]m —
+    // using the wrong range causes parameter jumps during pre-aim target switching.
+    double clampDist =
         isPassing
-            ? ShotTables.passingTimeOfFlightS(initialDist)
-            : ShotTables.timeOfFlightS(initialDist);
-
-    // Apply the aerodynamic inheritance decay factor to the radial velocity
-    // component
-    double effectiveRadialVel = radialVelocity * Constants.Shot.kInertiaInheritance;
-
-    // CRITICAL FIX: Since positive radialVel means moving TOWARDS the target,
-    // the ball inherits forward energy. Therefore, the shooter needs to do LESS
-    // work,
-    // meaning we look up a SHORTER effective distance.
-    double effectiveLookupDist = initialDist - (effectiveRadialVel * baseToF);
-
-    // Clamp to physical table boundaries so extreme high-speed retreats don't crash
-    // the splines
-    effectiveLookupDist =
-        Math.max(
-            ShotTables.MIN_DISTANCE_M, Math.min(effectiveLookupDist, ShotTables.MAX_DISTANCE_M));
+            ? Math.max(
+                ShotTables.MIN_PASSING_DISTANCE_M,
+                Math.min(lookaheadDist, ShotTables.MAX_PASSING_DISTANCE_M))
+            : Math.max(
+                ShotTables.MIN_DISTANCE_M, Math.min(lookaheadDist, ShotTables.MAX_DISTANCE_M));
 
     // ── Step 8: Look up launch parameters (spline-based) ──
-    // Use the *effective radial distance* rather than the hypotenuse lookaheadDist
+    // Use the full 3D lookahead distance
     double hoodAngleRad =
-        isPassing
-            ? ShotTables.passingHoodAngleRad(effectiveLookupDist)
-            : ShotTables.hoodAngleRad(effectiveLookupDist);
+        isPassing ? ShotTables.passingHoodAngleRad(clampDist) : ShotTables.hoodAngleRad(clampDist);
     double flywheelSpeedRotPerSec =
         isPassing
-            ? ShotTables.passingFlywheelSpeedRotPerSec(effectiveLookupDist)
-            : ShotTables.flywheelSpeedRotPerSec(effectiveLookupDist);
+            ? ShotTables.passingFlywheelSpeedRotPerSec(clampDist)
+            : ShotTables.flywheelSpeedRotPerSec(clampDist);
 
     // Clamp to physical limits (e.g. 0 to 80 RPS)
     flywheelSpeedRotPerSec = Math.max(0.0, Math.min(flywheelSpeedRotPerSec, 80.0));
@@ -338,38 +414,56 @@ public class ShotCalculator {
     // ── Step 9: Feedforward derivatives ──
     // Numerical differentiation: (current - previous) / dt, filtered
     double hoodVelocity;
+    double turretVelocityRadPerSec;
 
-    if (Double.isNaN(mLastHoodAngleRad)) {
+    if (Double.isNaN(mLastHoodAngleRad) || Double.isNaN(mLastTurretAngleRad)) {
       // First call: no derivative available
       hoodVelocity = 0.0;
+      turretVelocityRadPerSec = 0.0;
     } else {
       double rawHoodVelocity = (hoodAngleRad - mLastHoodAngleRad) / Constants.kLooperDt;
       hoodVelocity = mHoodAngleFilter.calculate(rawHoodVelocity);
+
+      double rawTurretVelocity =
+          edu.wpi.first.math.MathUtil.angleModulus(turretAngleRad - mLastTurretAngleRad)
+              / Constants.kLooperDt;
+      turretVelocityRadPerSec = mTurretVelocityFilter.calculate(rawTurretVelocity);
     }
     mLastHoodAngleRad = hoodAngleRad;
+    mLastTurretAngleRad = turretAngleRad;
 
     // ── Build result ──
+    boolean hasTarget = true; // Coordinate-based targets are always pointable
+    // Passing has no distance limit — clamp is handled at the lookup layer.
+    // HUB shots require distance within the calibrated table range.
     boolean isValid =
         !inBadBox
             && (isPassing
-                ? (initialDist >= 0.0 && initialDist <= 12.0)
-                : (initialDist >= ShotTables.MIN_DISTANCE_M
+                || (initialDist >= ShotTables.MIN_DISTANCE_M
                     && initialDist <= ShotTables.MAX_DISTANCE_M));
 
-    // edu.wpi.first.wpilibj.smartdashboard.SmartDashboard.putBoolean("Shooter/IsPassing",
-    // isPassing);
-    // edu.wpi.first.wpilibj.smartdashboard.SmartDashboard.putBoolean("Shooter/InBadBox",
-    // inBadBox);
+    // ── [Fix] Physical Trajectory Terminal Descent Angle ──
+    double physicalTof =
+        isPassing
+            ? ShotTables.passingTimeOfFlightS(clampDist)
+            : ShotTables.timeOfFlightS(clampDist);
+    double deltaH = isPassing ? 0.0 : (1.83 - frc.robot.Constants.Shot.kShooterHeightMeters);
+    double vzf = (physicalTof > 1e-6) ? ((deltaH / physicalTof) - 0.5 * 9.81 * physicalTof) : 0.0;
+    double vxy = (physicalTof > 1e-6) ? (clampDist / physicalTof) : 0.0;
+    double descentAngleRads = (vxy > 1e-6) ? Math.atan2(Math.abs(vzf), vxy) : Math.PI / 2.0;
 
     // The only object mutation, we pre-allocate and only update to avoid GC
     mCachedParameters.update(
         isValid,
+        hasTarget,
         isPassing,
         turretAngleRad,
+        turretVelocityRadPerSec,
         hoodAngleRad,
         hoodVelocity,
         flywheelSpeedRotPerSec,
-        lookaheadDist);
+        lookaheadDist,
+        descentAngleRads);
 
     mIsCached = true;
     return mCachedParameters;

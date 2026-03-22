@@ -14,11 +14,13 @@ import com.ctre.phoenix6.hardware.Pigeon2;
 import com.ctre.phoenix6.hardware.TalonFX;
 import com.ctre.phoenix6.signals.NeutralModeValue;
 import edu.wpi.first.math.geometry.Rotation2d;
+import edu.wpi.first.math.kinematics.SwerveModulePosition;
 import edu.wpi.first.units.measure.Angle;
 import edu.wpi.first.units.measure.AngularVelocity;
 import edu.wpi.first.units.measure.Current;
 import edu.wpi.first.units.measure.LinearAcceleration;
 import edu.wpi.first.units.measure.Voltage;
+import edu.wpi.first.wpilibj.Threads;
 import edu.wpi.first.wpilibj.Timer;
 import frc.robot.Constants;
 import frc.robot.subsystems.swerve.SwerveModuleConfigurator;
@@ -106,7 +108,11 @@ public class DriveIOReal implements DriveIO {
     mSteerCurrents = new StatusSignal[4];
     mSteerAbsolutePositions = new StatusSignal[4];
 
-    mPigeon = new Pigeon2(Constants.Swerve.kPigeonId, Constants.kDriveCANBusName);
+    mPigeon = new Pigeon2(Constants.Swerve.kPigeonId);
+
+    // 提升 Pigeon2 更新率至 250Hz 以利砲塔追蹤 (與高 kP 同步)
+    mPigeon.getYaw().setUpdateFrequency(250.0);
+    mPigeon.getAngularVelocityZWorld().setUpdateFrequency(250.0);
 
     // IMPORTANT: MountPose configuration is intentionally NOT set in code.
     // Following Team 254's approach: Use Phoenix Tuner X to calibrate MountPose,
@@ -145,9 +151,9 @@ public class DriveIOReal implements DriveIO {
     List<BaseStatusSignal> lowFreqList = new ArrayList<>();
 
     for (int i = 0; i < 4; i++) {
-      mDriveMotors[i] = new TalonFX(driveIds[i], Constants.kDriveCANBusName);
-      mSteerMotors[i] = new TalonFX(steerIds[i], Constants.kDriveCANBusName);
-      mCANCoders[i] = new CANcoder(cancoderIds[i], Constants.kDriveCANBusName);
+      mDriveMotors[i] = new TalonFX(driveIds[i]);
+      mSteerMotors[i] = new TalonFX(steerIds[i]);
+      mCANCoders[i] = new CANcoder(cancoderIds[i]);
 
       boolean isModuleValid =
           SwerveModuleConfigurator.configure(
@@ -172,25 +178,30 @@ public class DriveIOReal implements DriveIO {
       mSteerCurrents[i] = mSteerMotors[i].getSupplyCurrent();
       mSteerAbsolutePositions[i] = mCANCoders[i].getAbsolutePosition();
 
-      if (isModuleValid) {
-        // High Frequency: Position and Velocity are critical for Odometry and Control
-        highFreqList.add(mDrivePositions[i]);
-        highFreqList.add(mDriveVelocities[i]);
-        highFreqList.add(mSteerPositions[i]);
-        highFreqList.add(mSteerAbsolutePositions[i]); // Seeding only, but good to have
+      // 無論 isModuleValid 是否為 true，都要將 Signal 加入更新清單。
+      // 否則 updateInputs() 裡面迴圈存取 mDrivePositions[i] 等，如果遇到從未 refresh 的空物件會導致
+      // NullPointerException
+      // 或引發 CTRE 底層的 Invalid Argument。
+      // High Frequency: Position signals are absolutely critical for 250Hz Odometry
+      highFreqList.add(mDrivePositions[i]);
+      highFreqList.add(mSteerPositions[i]);
 
-        // Low Frequency: Voltages and Currents are for telemetry/diagnostics only
-        lowFreqList.add(mDriveAppliedVolts[i]);
-        lowFreqList.add(mDriveCurrents[i]);
-        lowFreqList.add(mDriveSupplyVoltages[i]);
-        lowFreqList.add(mSteerVelocities[i]); // We don't control steer velocity directly
-        lowFreqList.add(mSteerAppliedVolts[i]);
-        lowFreqList.add(mSteerCurrents[i]);
-      } else {
+      // Low Frequency (50Hz loop): Velocities, Absolute Positions (for seeding),
+      // Voltages, Currents
+      lowFreqList.add(mDriveVelocities[i]);
+      lowFreqList.add(mSteerAbsolutePositions[i]);
+      lowFreqList.add(mDriveAppliedVolts[i]);
+      lowFreqList.add(mDriveCurrents[i]);
+      lowFreqList.add(mDriveSupplyVoltages[i]);
+      lowFreqList.add(mSteerVelocities[i]); // We don't control steer velocity directly
+      lowFreqList.add(mSteerAppliedVolts[i]);
+      lowFreqList.add(mSteerCurrents[i]);
+
+      if (!isModuleValid) {
         System.err.println(
             "CRITICAL: Module "
                 + i
-                + " FAILED config - Excluding from synchronous updates to prevent Loop Overrun.");
+                + " FAILED config. Will still poll its status but it may be unresponsive.");
       }
     }
 
@@ -206,9 +217,9 @@ public class DriveIOReal implements DriveIO {
 
     // Pigeon High Frequency
     highFreqList.add(mPigeonYaw);
-    highFreqList.add(mPigeonYawRate);
 
     // Pigeon Low Frequency
+    lowFreqList.add(mPigeonYawRate);
     lowFreqList.add(mPigeonPitch);
     lowFreqList.add(mPigeonRoll);
     lowFreqList.add(mPigeonPitchRate);
@@ -247,11 +258,16 @@ public class DriveIOReal implements DriveIO {
     Timer.delay(0.25);
 
     // Configure Update Frequencies
-    // High Frequency: 50Hz (Matches Loop)
-    BaseStatusSignal.setUpdateFrequencyForAll(50.0, mHighFreqSignals);
+    // High Frequency: 250Hz (Matches Odometry Loop)
+    BaseStatusSignal.setUpdateFrequencyForAll(250.0, mHighFreqSignals);
 
     // Low Frequency: 4Hz (Telemetry ~250ms)
     BaseStatusSignal.setUpdateFrequencyForAll(4.0, mLowFreqSignals);
+
+    // CRITICAL FIX: Steer motors use RemoteCANcoder for feedback!
+    // The CANcoder must broadcast its absolute position at 100Hz so the TalonFX
+    // can run its 1000Hz onboard steer PID smoothly. 4Hz is far too slow!
+    BaseStatusSignal.setUpdateFrequencyForAll(100.0, mSteerAbsolutePositions);
   }
 
   @Override
@@ -429,5 +445,90 @@ public class DriveIOReal implements DriveIO {
       return versionSignal.getValue();
     }
     return 0;
+  }
+
+  // ============================================================
+  // 250Hz ODOMETRY THREAD
+  // ============================================================
+
+  private volatile OdometrySnapshot mLatestOdometrySnapshot = new OdometrySnapshot();
+
+  @Override
+  public OdometrySnapshot getLatestOdometrySnapshot() {
+    return mLatestOdometrySnapshot;
+  }
+
+  @Override
+  public void startOdometryThread() {
+    BaseStatusSignal pigeonYawClone = mPigeonYaw.clone();
+
+    BaseStatusSignal[] drivePosClones =
+        new BaseStatusSignal[] {
+          mDrivePositions[0].clone(), mDrivePositions[1].clone(),
+          mDrivePositions[2].clone(), mDrivePositions[3].clone()
+        };
+
+    BaseStatusSignal[] steerPosClones =
+        new BaseStatusSignal[] {
+          mSteerPositions[0].clone(), mSteerPositions[1].clone(),
+          mSteerPositions[2].clone(), mSteerPositions[3].clone()
+        };
+
+    BaseStatusSignal[] odometryDriveSignals =
+        new BaseStatusSignal[] {
+          drivePosClones[0],
+          drivePosClones[1],
+          drivePosClones[2],
+          drivePosClones[3],
+          steerPosClones[0],
+          steerPosClones[1],
+          steerPosClones[2],
+          steerPosClones[3]
+        };
+
+    Thread thread =
+        new Thread(
+            () -> {
+              Threads.setCurrentThreadPriority(true, 41);
+              while (!Thread.interrupted()) {
+                // RIO CAN bus DOES NOT support multi-signal synchronization (-10002 error).
+                // We wait for the pigeon's high frequency packet to pace the 250Hz thread,
+                // and then non-blockingly refresh the remaining motor signals.
+                var status = BaseStatusSignal.waitForAll(0.02, pigeonYawClone);
+                if (!status.isOK()) {
+                  continue;
+                }
+                BaseStatusSignal.refreshAll(odometryDriveSignals);
+
+                OdometrySnapshot snap = new OdometrySnapshot();
+                snap.timestamp = Timer.getFPGATimestamp();
+                snap.gyroYaw = Rotation2d.fromDegrees(pigeonYawClone.getValueAsDouble());
+                snap.gyroYawVelocityRadPerSec = Math.toRadians(mPigeonYawRate.getValueAsDouble());
+                snap.gyroPitchVelocityRadPerSec =
+                    Math.toRadians(mPigeonPitchRate.getValueAsDouble());
+                snap.gyroRollVelocityRadPerSec = Math.toRadians(mPigeonRollRate.getValueAsDouble());
+                snap.accelMetersPerSec2[0] = mPigeonAccelX.getValueAsDouble() * 9.81;
+                snap.accelMetersPerSec2[1] = mPigeonAccelY.getValueAsDouble() * 9.81;
+                snap.accelMetersPerSec2[2] = mPigeonAccelZ.getValueAsDouble() * 9.81;
+
+                for (int i = 0; i < 4; i++) {
+                  snap.drivePositionRotations[i] = drivePosClones[i].getValueAsDouble();
+                  snap.steerPositionRotations[i] = steerPosClones[i].getValueAsDouble();
+                  double distMeters =
+                      snap.drivePositionRotations[i]
+                          * Constants.Swerve.Control.kWheelCircumference
+                          * Constants.Swerve.Control.kDrivePositionCoefficient;
+                  snap.modulePositions[i] =
+                      new SwerveModulePosition(
+                          distMeters, Rotation2d.fromRotations(snap.steerPositionRotations[i]));
+                }
+
+                mLatestOdometrySnapshot = snap;
+              }
+            });
+    thread.setDaemon(true);
+    thread.setName("Odometry-250Hz");
+    thread.start();
+    System.out.println("[DriveIOReal] 250Hz Odometry Thread started.");
   }
 }

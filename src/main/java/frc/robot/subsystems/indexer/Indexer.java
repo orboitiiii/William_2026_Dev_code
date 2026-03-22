@@ -57,6 +57,8 @@ public class Indexer extends Subsystem {
    */
   private boolean mSideRollerRunning = false;
 
+  private boolean mSideRollerReversed = false;
+
   private boolean mStraightRollerRunning = false;
 
   /**
@@ -140,6 +142,18 @@ public class Indexer extends Subsystem {
    */
   public synchronized void setSideRollerRunning(boolean running) {
     mSideRollerRunning = running;
+    if (!running) {
+      mSideRollerReversed = false;
+    }
+  }
+
+  /**
+   * Sets the reversed state of the Side Roller.
+   *
+   * @param reversed True to run the side roller in reverse.
+   */
+  public synchronized void setSideRollerReversed(boolean reversed) {
+    mSideRollerReversed = reversed;
   }
 
   /**
@@ -191,14 +205,30 @@ public class Indexer extends Subsystem {
   @Override
   public void travelOperate() {
     mStraightRollerRunning = false;
-    mSideRollerRunning = false;
+
+    var control = frc.robot.ControlBoard.getInstance();
+    if (control.getSideRollerButton()) {
+      mSideRollerRunning = true;
+      mSideRollerReversed = true;
+    } else {
+      mSideRollerRunning = false;
+      mSideRollerReversed = false;
+    }
   }
 
   @Override
   public void intakeOperate() {
     // Indexer idle during intake (only intake wheel runs)
     mStraightRollerRunning = false;
-    mSideRollerRunning = false;
+
+    var control = frc.robot.ControlBoard.getInstance();
+    if (control.getSideRollerButton()) {
+      mSideRollerRunning = true;
+      mSideRollerReversed = true;
+    } else {
+      mSideRollerRunning = false;
+      mSideRollerReversed = false;
+    }
   }
 
   @Override
@@ -214,16 +244,17 @@ public class Indexer extends Subsystem {
 
     if (params != null && params.isValid) {
       double error = Math.abs(params.flywheelSpeedRotPerSec - currentVel);
-
-      // Strict conditions for feeding ball into the shooter:
-      // 1. Flywheel within 5.0 RPS of target
-      // 2. Turret is at goal (aimed correctly)
-      // 3. Hood is at goal (elevated correctly)
-      boolean speedLocked = (error < 5.0);
       boolean turretLocked = turret.isAtGoal();
       boolean hoodLocked = hood.isAtGoal();
 
-      mSideRollerRunning = speedLocked && turretLocked && hoodLocked;
+      // Enter/exit hysteresis for feeding: once locked, use wider flywheel
+      // tolerance to prevent chatter from speed ripple during shoot-on-move.
+      // Turret & Hood already have internal enter/exit hysteresis in isAtGoal().
+      if (mSideRollerRunning) {
+        mSideRollerRunning = (error < 8.0) && turretLocked && hoodLocked;
+      } else {
+        mSideRollerRunning = (error < 5.0) && turretLocked && hoodLocked;
+      }
 
       // Anti-collision: cap spinner RPS based on distance to prevent
       // mid-air ball collisions at close range (high launch angle = low
@@ -243,9 +274,61 @@ public class Indexer extends Subsystem {
     }
   }
 
+  public void scoreLockedOperate() {
+    mStraightRollerRunning = true;
+    var shooter = frc.robot.subsystems.shooter.Shooter.getInstance();
+    var hood = frc.robot.subsystems.hood.Hood.getInstance();
+
+    double currentVel = shooter.getAverageVelocity();
+    var params = frc.robot.GlobalData.currentShotParams;
+
+    if (params != null && params.isValid) {
+      double error = Math.abs(params.flywheelSpeedRotPerSec - currentVel);
+      boolean hoodLocked = hood.isAtGoal();
+
+      if (mSideRollerRunning) {
+        mSideRollerRunning = (error < 8.0) && hoodLocked;
+      } else {
+        mSideRollerRunning = (error < 5.0) && hoodLocked;
+      }
+    } else {
+      mSideRollerRunning = false;
+    }
+  }
+
   @Override
   public void passOperate() {
-    setRunning(true);
+    // Straight roller pre-stages the ball immediately
+    mStraightRollerRunning = true;
+
+    // Side roller gated by flywheel/turret/hood lock to prevent out-of-field shots
+    var shooter = frc.robot.subsystems.shooter.Shooter.getInstance();
+    var turret = frc.robot.subsystems.turret.Turret.getInstance();
+    var hood = frc.robot.subsystems.hood.Hood.getInstance();
+
+    double currentVel = shooter.getAverageVelocity();
+    var params = frc.robot.GlobalData.currentShotParams;
+
+    if (params != null && params.isValid) {
+      double error = Math.abs(params.flywheelSpeedRotPerSec - currentVel);
+      boolean turretLocked = turret.isAtGoal();
+      boolean hoodLocked = hood.isAtGoal();
+
+      // Passing uses wider flywheel tolerance than scoring:
+      // Enter at 6.0 RPS error, exit at 10.0 RPS error.
+      // Passing precision matters less than hub scoring, but balls
+      // must not fly out of the field boundary.
+      if (mSideRollerRunning) {
+        mSideRollerRunning = (error < 10.0) && turretLocked && hoodLocked;
+      } else {
+        mSideRollerRunning = (error < 6.0) && turretLocked && hoodLocked;
+      }
+
+      mSideRollerTargetRps = frc.robot.Constants.Indexer.kSideRollerTargetVelocity;
+    } else {
+      mSideRollerRunning = false;
+      mSideRollerTargetRps = frc.robot.Constants.Indexer.kSideRollerTargetVelocity;
+    }
   }
 
   @Override
@@ -267,11 +350,17 @@ public class Indexer extends Subsystem {
     // Side roller only when shooter is at target speed
     var shooter = frc.robot.subsystems.shooter.Shooter.getInstance();
     double currentVel = shooter.getAverageVelocity();
-    double targetVel = 44;
+    double targetVel = 44; // Target fixed RPM for testing
 
-    // Check if within 1.0 RPS of target AND Hood is at goal
     var hood = frc.robot.subsystems.hood.Hood.getInstance();
-    if (Math.abs(currentVel - targetVel) < 1.0 && hood.isAtGoal()) {
+    var turret = frc.robot.subsystems.turret.Turret.getInstance();
+
+    boolean speedLocked = Math.abs(currentVel - targetVel) < 1.0;
+    boolean hoodLocked = hood.isAtGoal();
+    boolean turretLocked = turret.isAtGoal();
+
+    // Check if within 1.0 RPS of target AND Hood/Turret are at goal
+    if (speedLocked && hoodLocked && turretLocked) {
       mSideRollerRunning = true;
     } else {
       mSideRollerRunning = false;
@@ -369,10 +458,25 @@ public class Indexer extends Subsystem {
   @Override
   public void writePeriodicOutputs() {
     synchronized (this) {
+      double sideTarget = mSideRollerTargetRps;
+      double straightTarget = frc.robot.Constants.Indexer.kStraightRollerTargetVelocity;
+
+      if (frc.robot.GlobalData.isAutonomous
+          && frc.robot.GlobalData.robotState != frc.robot.RobotState.SCORE_TEST) {
+        if (frc.robot.GlobalData.robotState != frc.robot.RobotState.SCORE) {
+          sideTarget *= 1.5;
+          straightTarget *= 1.5;
+        }
+      }
+
       if (mSideSysIdActive) {
         mIO.setSideRollerVoltage(mSideSysIdRoutine.getOutputVoltage());
       } else if (mSideRollerRunning) {
-        mIO.setSideRollerTargetVelocity(mSideRollerTargetRps);
+        if (mSideRollerReversed) {
+          mIO.setSideRollerTargetVelocity(-sideTarget);
+        } else {
+          mIO.setSideRollerTargetVelocity(sideTarget);
+        }
       } else {
         mIO.setSideRollerVoltage(0.0);
       }
@@ -380,8 +484,7 @@ public class Indexer extends Subsystem {
       if (mStraightSysIdActive) {
         mIO.setStraightRollerVoltage(mStraightSysIdRoutine.getOutputVoltage());
       } else if (mStraightRollerRunning) {
-        mIO.setStraightRollerTargetVelocity(
-            frc.robot.Constants.Indexer.kStraightRollerTargetVelocity);
+        mIO.setStraightRollerTargetVelocity(straightTarget);
       } else {
         mIO.setStraightRollerVoltage(0.0);
       }

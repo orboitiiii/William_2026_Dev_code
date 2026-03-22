@@ -4,13 +4,8 @@ import edu.wpi.first.math.MathUtil;
 import edu.wpi.first.math.Matrix;
 import edu.wpi.first.math.VecBuilder;
 import edu.wpi.first.math.geometry.Pose2d;
-import edu.wpi.first.math.geometry.Pose3d;
 import edu.wpi.first.math.geometry.Rotation2d;
-import edu.wpi.first.math.geometry.Rotation3d;
-import edu.wpi.first.math.geometry.Transform3d;
 import edu.wpi.first.math.geometry.Translation2d;
-import edu.wpi.first.math.geometry.Translation3d;
-import edu.wpi.first.math.interpolation.TimeInterpolatableBuffer;
 import edu.wpi.first.math.numbers.N1;
 import edu.wpi.first.math.numbers.N3;
 import edu.wpi.first.wpilibj.Timer;
@@ -20,7 +15,6 @@ import frc.robot.framework.ILoop;
 import frc.robot.framework.Looper;
 import frc.robot.framework.Subsystem;
 import frc.robot.subsystems.drive.Drive;
-import frc.robot.subsystems.turret.Turret;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -34,12 +28,11 @@ import java.util.Optional;
  * <p>Core features:
  *
  * <ul>
- *   <li>Triple camera MegaTag pose estimation processing (Front, Left, Turret-Right)
+ *   <li>Triple camera MegaTag pose estimation processing (Front, Left, Up)
  *   <li>Inverse-variance weighting fusion of multi-camera estimates
  *   <li>Single-tag gyro fusion for improved accuracy (fuseWithGyro)
  *   <li>Dynamic standard deviation adjustment
  *   <li>Vision measurement rejection logic
- *   <li>Dynamic Inverse Kinematics for Turret-Mounted Cameras
  * </ul>
  */
 public class VisionSubsystem extends Subsystem {
@@ -61,10 +54,8 @@ public class VisionSubsystem extends Subsystem {
 
   private double lastGyroResetTime = 0.0;
 
-  // Task 1: Create Turret History Trajectory Buffer
-  // Solves Temporal Desync Fallacy caused by vision processing delays
-  private final TimeInterpolatableBuffer<Rotation2d> mTurretAngleHistory =
-      TimeInterpolatableBuffer.createBuffer(1.5);
+  // We removed turret dynamic camera processing, so no longer need
+  // mTurretAngleHistory
 
   /**
    * Creates a new vision subsystem.
@@ -87,9 +78,7 @@ public class VisionSubsystem extends Subsystem {
     enabledLooper.register(
         new ILoop() {
           @Override
-          public void onStart(double timestamp) {
-            mTurretAngleHistory.clear();
-          }
+          public void onStart(double timestamp) {}
 
           @Override
           public void onLoop(double timestamp) {
@@ -106,75 +95,29 @@ public class VisionSubsystem extends Subsystem {
   @Override
   public void readPeriodicInputs() {
     io.readInputs(inputs);
-
-    // Record the turret angle at the current timestamp, used later for delaying
-    // synchronization
-    double currentTime = Timer.getFPGATimestamp();
-    mTurretAngleHistory.addSample(currentTime, Turret.getInstance().getAngle());
   }
 
   @Override
   public void writePeriodicOutputs() {
     logCameraInputs("Vision/CameraFront", inputs.cameraFront, inputs.cameraFrontConnected);
     logCameraInputs("Vision/CameraLeft", inputs.cameraLeft, inputs.cameraLeftConnected);
-    logCameraInputs("Vision/CameraRight", inputs.cameraRight, inputs.cameraRightConnected);
+    logCameraInputs("Vision/CameraUp", inputs.cameraUp, inputs.cameraUpConnected);
 
-    updatePipelineAndCrop(
-        VisionConstants.kFrontLimelightName,
-        inputs.cameraFront.seesTarget,
-        inputs.cameraFront.txDeg,
-        inputs.cameraFront.tyDeg,
-        inputs.cameraFront.latencyPipelineMs);
-    updatePipelineAndCrop(
-        VisionConstants.kLeftLimelightName,
-        inputs.cameraLeft.seesTarget,
-        inputs.cameraLeft.txDeg,
-        inputs.cameraLeft.tyDeg,
-        inputs.cameraLeft.latencyPipelineMs);
-    updatePipelineAndCrop(
-        VisionConstants.kRightLimelightName,
-        inputs.cameraRight.seesTarget,
-        inputs.cameraRight.txDeg,
-        inputs.cameraRight.tyDeg,
-        inputs.cameraRight.latencyPipelineMs);
+    updatePipelineAndCrop(VisionConstants.kFrontLimelightName, inputs.cameraFront);
+    updatePipelineAndCrop(VisionConstants.kLeftLimelightName, inputs.cameraLeft);
+    updatePipelineAndCrop(VisionConstants.kUpLimelightName, inputs.cameraUp);
 
     if (!useVision || frc.robot.DashboardState.getInstance().isApriltagDisabled()) {
       return;
     }
 
-    // List to collect all valid estimates from the current cycle
+    // 靜態相機（前、左）：Limelight Web UI 已配置 camera offset，
+    // 因此 MegaTag1 的 botpose 已經是真正的機器人場座標 Pose，不需任何轉換。
     List<VisionFieldPoseEstimate> validEstimates = new ArrayList<>();
 
-    // Process Static Camera: Front (Converts Transform2d to Transform3d)
-    Transform3d frontTransform3d =
-        new Transform3d(
-            new Translation3d(
-                VisionConstants.kRobotToFrontCamera.getX(),
-                VisionConstants.kRobotToFrontCamera.getY(),
-                0.0),
-            new Rotation3d(
-                0.0, 0.0, VisionConstants.kRobotToFrontCamera.getRotation().getRadians()));
-
-    processStaticCamera(inputs.cameraFront, "CameraFront", frontTransform3d)
-        .ifPresent(validEstimates::add);
-
-    // Process Static Camera: Left
-    Transform3d leftTransform3d =
-        new Transform3d(
-            new Translation3d(
-                VisionConstants.kRobotToLeftCamera.getX(),
-                VisionConstants.kRobotToLeftCamera.getY(),
-                0.0),
-            new Rotation3d(
-                0.0, 0.0, VisionConstants.kRobotToLeftCamera.getRotation().getRadians()));
-
-    processStaticCamera(inputs.cameraLeft, "CameraLeft", leftTransform3d)
-        .ifPresent(validEstimates::add);
-
-    // Process Dynamic Camera: Right (Turret mounted)
-    processDynamicCamera(
-            inputs.cameraRight, "CameraRight", VisionConstants.kTurretCenterToRightCamera)
-        .ifPresent(validEstimates::add);
+    processStaticCamera(inputs.cameraFront, "CameraFront").ifPresent(validEstimates::add);
+    processStaticCamera(inputs.cameraLeft, "CameraLeft").ifPresent(validEstimates::add);
+    processStaticCamera(inputs.cameraUp, "CameraUp").ifPresent(validEstimates::add);
 
     // Fuse or select estimate
     Optional<VisionFieldPoseEstimate> accepted = Optional.empty();
@@ -190,39 +133,136 @@ public class VisionSubsystem extends Subsystem {
         est -> {
           state.updateMegatagEstimate(est);
           acceptedEstimateCount++;
-          frc.robot.DashboardState.getInstance().lastVisionTimestamp = est.getTimestampSeconds();
+          // frc.robot.DashboardState.getInstance().lastVisionTimestamp =
+          // est.getTimestampSeconds();
         });
 
     frc.robot.DashboardState.getInstance().frontLLOK = inputs.cameraFrontConnected;
   }
 
-  private void updatePipelineAndCrop(
-      String cameraName, boolean seesTarget, double txDeg, double tyDeg, double latencyMs) {
-    if (!seesTarget) {
+  private void updatePipelineAndCrop(String cameraName, VisionIO.CameraInputs cam) {
+    if (!cam.seesTarget) {
       io.setPipelineIndex(cameraName, VisionConstants.kPipelineSearch);
       io.setCropWindow(cameraName, -1.0, 1.0, -1.0, 1.0);
       return;
     }
     io.setPipelineIndex(cameraName, VisionConstants.kPipelineTrack);
-    double half =
-        VisionConstants.kCropHalfSizeNorm + latencyMs * VisionConstants.kCropMarginPerMsLatency;
-    double xNorm = (txDeg + VisionConstants.kFovHorizDeg / 2.0) / VisionConstants.kFovHorizDeg;
-    double yNorm = (tyDeg + VisionConstants.kFovVertDeg / 2.0) / VisionConstants.kFovVertDeg;
-    double xMin = MathUtil.clamp((xNorm - half) * 2.0 - 1.0, -1.0, 1.0);
-    double xMax = MathUtil.clamp((xNorm + half) * 2.0 - 1.0, -1.0, 1.0);
-    double yMin = MathUtil.clamp((yNorm - half) * 2.0 - 1.0, -1.0, 1.0);
-    double yMax = MathUtil.clamp((yNorm + half) * 2.0 - 1.0, -1.0, 1.0);
+
+    double latencyMargin = cam.latencyPipelineMs * VisionConstants.kCropMarginPerMsLatency;
+    double halfX = VisionConstants.kCropHalfSizeHoriz + latencyMargin;
+    double halfY = VisionConstants.kCropHalfSizeVert + latencyMargin;
+
+    double xCenter =
+        (cam.txDeg + VisionConstants.kFovHorizDeg / 2.0) / VisionConstants.kFovHorizDeg;
+    double yCenter = (cam.tyDeg + VisionConstants.kFovVertDeg / 2.0) / VisionConstants.kFovVertDeg;
+
+    mCropXMin = xCenter - halfX;
+    mCropXMax = xCenter + halfX;
+    mCropYMin = yCenter - halfY;
+    mCropYMax = yCenter + halfY;
+
+    expandCropForNeighborTags(cam);
+
+    double xMin = MathUtil.clamp(mCropXMin * 2.0 - 1.0, -1.0, 1.0);
+    double xMax = MathUtil.clamp(mCropXMax * 2.0 - 1.0, -1.0, 1.0);
+    double yMin = MathUtil.clamp(mCropYMin * 2.0 - 1.0, -1.0, 1.0);
+    double yMax = MathUtil.clamp(mCropYMax * 2.0 - 1.0, -1.0, 1.0);
     io.setCropWindow(cameraName, xMin, xMax, yMin, yMax);
   }
 
-  /** Fuses multiple vision pose estimates iteratively using inverse-variance weighting. */
+  private double mCropXMin, mCropXMax, mCropYMin, mCropYMax;
+
+  /**
+   * Expands the crop bounding box toward neighbor tags that the field layout predicts are nearby.
+   * Uses the robot's current estimated pose and the detected tag's known position to project
+   * neighbor locations into normalized camera coordinates.
+   */
+  private void expandCropForNeighborTags(VisionIO.CameraInputs cam) {
+    if (cam.fiducialObservations == null || cam.fiducialObservations.length == 0) return;
+
+    int seenId = cam.fiducialObservations[0].id;
+    var layout = frc.robot.FieldConstants.AprilTagLayoutType.OFFICIAL.getLayout();
+    if (layout == null) return;
+
+    var seenTagPoseOpt = layout.getTagPose(seenId);
+    if (seenTagPoseOpt.isEmpty()) return;
+
+    Translation2d seenTag2d = seenTagPoseOpt.get().toPose2d().getTranslation();
+
+    Pose2d robotPose;
+    try {
+      robotPose = frc.robot.subsystems.RobotStateEstimator.getInstance().getEstimatedPose();
+    } catch (Exception e) {
+      return;
+    }
+
+    double marginNormX = VisionConstants.kCropNeighborMarginDeg / VisionConstants.kFovHorizDeg;
+
+    for (var tag : layout.getTags()) {
+      if (tag.ID == seenId) continue;
+      Translation2d neighbor2d = tag.pose.toPose2d().getTranslation();
+      if (seenTag2d.getDistance(neighbor2d) > VisionConstants.kNeighborSearchRadiusMeters) continue;
+
+      Translation2d robotToNeighbor = neighbor2d.minus(robotPose.getTranslation());
+      double angleToNeighbor =
+          Math.toDegrees(Math.atan2(robotToNeighbor.getY(), robotToNeighbor.getX()))
+              - robotPose.getRotation().getDegrees();
+      double neighborTxDeg = MathUtil.inputModulus(angleToNeighbor, -180, 180);
+
+      if (Math.abs(neighborTxDeg) > VisionConstants.kFovHorizDeg / 2.0) continue;
+
+      double neighborXNorm =
+          (neighborTxDeg + VisionConstants.kFovHorizDeg / 2.0) / VisionConstants.kFovHorizDeg;
+
+      mCropXMin = Math.min(mCropXMin, neighborXNorm - marginNormX);
+      mCropXMax = Math.max(mCropXMax, neighborXNorm + marginNormX);
+    }
+  }
+
+  /**
+   * Fuses multiple vision pose estimates using inverse-variance weighting, but only if the
+   * estimates agree within their combined uncertainty. When a close-tag camera and a far-tag camera
+   * disagree significantly, the far estimate is discarded to prevent oscillation.
+   */
   private VisionFieldPoseEstimate fuseMultipleEstimates(List<VisionFieldPoseEstimate> estimates) {
     if (estimates.size() == 0) return null;
     if (estimates.size() == 1) return estimates.get(0);
 
-    VisionFieldPoseEstimate fused = estimates.get(0);
+    // Find the estimate with the lowest XY stdDev (most trustworthy)
+    VisionFieldPoseEstimate best = estimates.get(0);
+    double bestStd = best.getVisionMeasurementStdDevs().get(0, 0);
     for (int i = 1; i < estimates.size(); i++) {
-      fused = fuseEstimates(fused, estimates.get(i));
+      double std = estimates.get(i).getVisionMeasurementStdDevs().get(0, 0);
+      if (std < bestStd) {
+        best = estimates.get(i);
+        bestStd = std;
+      }
+    }
+
+    // Only fuse estimates that agree with the best one within their combined
+    // uncertainty. Disagreeing far-tag estimates are dropped.
+    List<VisionFieldPoseEstimate> compatible = new ArrayList<>();
+    compatible.add(best);
+
+    for (var est : estimates) {
+      if (est == best) continue;
+
+      double dist =
+          best.getVisionRobotPoseMeters()
+              .getTranslation()
+              .getDistance(est.getVisionRobotPoseMeters().getTranslation());
+      double combinedStd =
+          best.getVisionMeasurementStdDevs().get(0, 0)
+              + est.getVisionMeasurementStdDevs().get(0, 0);
+
+      if (dist < combinedStd * 2.0) {
+        compatible.add(est);
+      }
+    }
+
+    VisionFieldPoseEstimate fused = compatible.get(0);
+    for (int i = 1; i < compatible.size(); i++) {
+      fused = fuseEstimates(fused, compatible.get(i));
     }
     return fused;
   }
@@ -249,15 +289,29 @@ public class VisionSubsystem extends Subsystem {
     var varianceA = a.getVisionMeasurementStdDevs().elementTimes(a.getVisionMeasurementStdDevs());
     var varianceB = b.getVisionMeasurementStdDevs().elementTimes(b.getVisionMeasurementStdDevs());
 
+    boolean aHasHeading = varianceA.get(2, 0) < VisionConstants.kLargeVariance;
+    boolean bHasHeading = varianceB.get(2, 0) < VisionConstants.kLargeVariance;
+
     Rotation2d fusedHeading;
-    if (varianceA.get(2, 0) < VisionConstants.kLargeVariance
-        && varianceB.get(2, 0) < VisionConstants.kLargeVariance) {
-      double weightRotA = 1.0 / varianceA.get(2, 0);
-      double weightRotB = 1.0 / varianceB.get(2, 0);
-      double t = weightRotB / (weightRotA + weightRotB);
-      fusedHeading = poseA.getRotation().interpolate(poseB.getRotation(), t);
+    double fusedRotVariance;
+
+    if (aHasHeading && bHasHeading) {
+      double wA = 1.0 / varianceA.get(2, 0);
+      double wB = 1.0 / varianceB.get(2, 0);
+      fusedHeading =
+          new Rotation2d(
+              poseA.getRotation().getCos() * wA + poseB.getRotation().getCos() * wB,
+              poseA.getRotation().getSin() * wA + poseB.getRotation().getSin() * wB);
+      fusedRotVariance = 1.0 / (wA + wB);
+    } else if (aHasHeading) {
+      fusedHeading = poseA.getRotation();
+      fusedRotVariance = varianceA.get(2, 0);
+    } else if (bHasHeading) {
+      fusedHeading = poseB.getRotation();
+      fusedRotVariance = varianceB.get(2, 0);
     } else {
       fusedHeading = poseB.getRotation();
+      fusedRotVariance = VisionConstants.kLargeVariance;
     }
 
     double weightAx = 1.0 / varianceA.get(0, 0);
@@ -276,9 +330,9 @@ public class VisionSubsystem extends Subsystem {
         VecBuilder.fill(
             Math.sqrt(1.0 / (weightAx + weightBx)),
             Math.sqrt(1.0 / (weightAy + weightBy)),
-            Math.sqrt(1.0 / (1.0 / varianceA.get(2, 0) + 1.0 / varianceB.get(2, 0))));
+            Math.sqrt(fusedRotVariance));
 
-    int numTags = Math.max(a.getNumTags(), b.getNumTags());
+    int numTags = a.getNumTags() + b.getNumTags();
     double time = b.getTimestampSeconds();
     double avgDist =
         (a.getAvgTagDistMeters() > 0 && b.getAvgTagDistMeters() > 0)
@@ -343,6 +397,10 @@ public class VisionSubsystem extends Subsystem {
    * 真正的最後防線是「零分配的底盤速限檢查」：機器人必須近乎靜止。
    */
   private void attemptGyroReset(MegatagPoseEstimate poseEstimate, Pose2d visionPose) {
+    if (!VisionConstants.kEnableGyroReset) {
+      return;
+    }
+
     if (Timer.getFPGATimestamp() - lastGyroResetTime < VisionConstants.kGyroResetDebounceSeconds) {
       return;
     }
@@ -391,89 +449,62 @@ public class VisionSubsystem extends Subsystem {
             + " deg");
   }
 
-  /** Processes a chassis mounted camera with a static transform. */
+  /**
+   * Processes a chassis-mounted static camera.
+   *
+   * <p>⚠️ 由於 Limelight Web UI 已配置好 camera offset， 因此 botpose 即為真正的機器人場座標位姿，不需額外的 inverse() 轉換。
+   *
+   * <p>Validation gates (254 pattern): Z-height, position norm, field bounds.
+   */
   private Optional<VisionFieldPoseEstimate> processStaticCamera(
-      VisionIO.CameraInputs cam, String label, Transform3d robotToCamera) {
+      VisionIO.CameraInputs cam, String label) {
 
     if (!cam.seesTarget || cam.megatagPoseEstimate == null || cam.pose3d == null) {
       return Optional.empty();
     }
 
-    MegatagPoseEstimate poseEstimate = cam.megatagPoseEstimate;
-
-    // Apply Static Inverse Kinematics
-    Pose3d cameraFieldPose = cam.pose3d;
-    Pose3d robotFieldPose = cameraFieldPose.transformBy(robotToCamera.inverse());
-
-    // Get true 2D chassis coordinates
-    Pose2d correctedVisionPose = robotFieldPose.toPose2d();
-
-    // Orbit2: Attempt to reset gyro hardware if close, trusted, and stationary
-    attemptGyroReset(poseEstimate, correctedVisionPose);
-
-    // Process MegaTag estimate using corrected pose
-    Optional<VisionFieldPoseEstimate> mtEstimate =
-        processMegatagPoseEstimate(poseEstimate, cam, correctedVisionPose, false);
-
-    // Try gyro fusion for single-tag
-    Optional<VisionFieldPoseEstimate> gyroEstimate =
-        fuseWithGyro(poseEstimate, cam, correctedVisionPose);
-
-    if (mtEstimate.isPresent()) {
-      return mtEstimate;
-    } else if (gyroEstimate.isPresent()) {
-      return gyroEstimate;
-    } else {
-      return Optional.empty();
-    }
-  }
-
-  /** Processes a turret mounted camera with a dynamic inverse kinematics. */
-  private Optional<VisionFieldPoseEstimate> processDynamicCamera(
-      VisionIO.CameraInputs cam, String label, Transform3d turretToCamera) {
-
-    if (!cam.seesTarget || cam.megatagPoseEstimate == null || cam.pose3d == null) {
+    if (Math.abs(cam.pose3d.getZ()) > VisionConstants.kMaxZHeightMeters) {
       return Optional.empty();
     }
 
     MegatagPoseEstimate poseEstimate = cam.megatagPoseEstimate;
 
-    // Task 2: Construct Dynamic Inverse Kinematics Chain
-    // Read historical angle (compensating for network and vision processing
-    // latency)
-    Rotation2d historicalAngle =
-        mTurretAngleHistory
-            .getSample(poseEstimate.timestampSeconds())
-            .orElse(Turret.getInstance().getAngle());
+    // 💡 反直覺工程觀點 (Counter-Intuitive Engineering Insight):
+    // 直覺上，多重感測器融合 (EKF) “有訊號總比沒訊號好”，因為可以藉由調高大距離測量的 Standard Deviation (測量標準差)
+    // 來降低權重。
+    // 但在 FRC 物理現實中：單一 AprilTag 在遠距離時，光學畸變與微小像素抖動都會被阿貝誤差 (Abbe Error) 放大為巨大的位移跳變。
+    // 這種非高斯分佈的跳變訊號會強烈拉扯 EKF，導致幽靈旋轉。多標籤雖然能消除 Ambiguity，但也仍有硬性物理極限。
+    // 在 1.8m (單標籤) 或 2.5m (多標籤) 之外，Swerve 高頻 (250Hz) 的四輪硬體計數純死區推算 (Dead-Reckoning)
+    // 精度，
+    // 實際上遠遠優於受噪聲污染的視覺測量。我們採用「嚴格硬性切斷 (Hard Cutoff)」捨棄不良訊號，讓里程計安靜地發揮它的作用。
+    double maxAllowedDistance =
+        poseEstimate.fiducialIds().length == 1
+            ? VisionConstants.kMaxSingleTagDistanceMeters
+            : VisionConstants.kMaxMultiTagDistanceMeters;
 
-    // Define robotToTurret
-    Transform3d robotToTurret =
-        new Transform3d(
-            VisionConstants.kRobotToTurretCenter.getTranslation(),
-            new Rotation3d(0, 0, historicalAngle.getRadians()));
+    if (poseEstimate.avgTagDist() > maxAllowedDistance) {
+      return Optional.empty();
+    }
 
-    // Calculate dynamicRobotToCamera
-    Transform3d dynamicRobotToCamera = robotToTurret.plus(turretToCamera);
+    Pose2d visionPose = cam.pose3d.toPose2d();
 
-    // Infer chassis coordinates
-    Pose3d cameraFieldPose =
-        cam.pose3d; // Raw factory camera field coordinates (assuming Web UI camera offsets are 0)
-    Pose3d robotFieldPose = cameraFieldPose.transformBy(dynamicRobotToCamera.inverse());
+    if (visionPose.getTranslation().getNorm() < VisionConstants.kMinPositionNormMeters) {
+      return Optional.empty();
+    }
 
-    // Get true 2D chassis coordinates
-    Pose2d correctedVisionPose = robotFieldPose.toPose2d();
+    if (visionPose.getX() < 0
+        || visionPose.getX() > VisionConstants.kFieldLengthMeters
+        || visionPose.getY() < 0
+        || visionPose.getY() > VisionConstants.kFieldWidthMeters) {
+      return Optional.empty();
+    }
 
-    // Orbit2: Attempt to reset gyro hardware if close, trusted, and stationary
-    attemptGyroReset(poseEstimate, correctedVisionPose);
+    attemptGyroReset(poseEstimate, visionPose);
 
-    // Process MegaTag estimate using corrected pose
-    // For dynamic cameras, we force disregard MT1 Heading (isDynamic = true)
     Optional<VisionFieldPoseEstimate> mtEstimate =
-        processMegatagPoseEstimate(poseEstimate, cam, correctedVisionPose, true);
+        processMegatagPoseEstimate(poseEstimate, cam, visionPose, false);
 
-    // Try gyro fusion for single-tag
-    Optional<VisionFieldPoseEstimate> gyroEstimate =
-        fuseWithGyro(poseEstimate, cam, correctedVisionPose);
+    Optional<VisionFieldPoseEstimate> gyroEstimate = fuseWithGyro(poseEstimate, cam, visionPose);
 
     if (mtEstimate.isPresent()) {
       return mtEstimate;
@@ -531,26 +562,38 @@ public class VisionSubsystem extends Subsystem {
       return Optional.empty();
     }
 
-    if (visionPose.getX() < 0
-        || visionPose.getY() < 0
-        || Double.isNaN(visionPose.getX())
-        || Double.isNaN(visionPose.getY())) {
+    if (Double.isNaN(visionPose.getX()) || Double.isNaN(visionPose.getY())) {
       return Optional.empty();
     }
 
-    double scaleFactor = 1.0 / Math.max(poseEstimate.quality(), 0.1);
-    double xStd = cam.standardDeviations[VisionConstants.kMegatag1XStdDevIndex] * scaleFactor;
-    double yStd = cam.standardDeviations[VisionConstants.kMegatag1YStdDevIndex] * scaleFactor;
+    // 💡 反直覺工程觀點 (Counter-Intuitive Engineering Insight): 二次衰減權重
+    // 原本直接沿用 Limelight 算出的 StdDev 與 Quality 做融合信任度 (Inverse-Variance Weighting)。
+    // 但 Limelight 的 Quality 對「阿貝誤差 (Abbe Error)」造成的側向位移放大非常不敏感。
+    // 如果把 0.5m (精準) 跟 2.0m (受畸變污染) 的相機訊號「平均融合」，結果會是毀滅性的晃動 (Jitter)。
+    // 因此，我們改採 Team 254 的物理幾何退化模型：信任懲罰必須隨「距離的平方 (Distance Squared)」成正比。
+    // 這創造了一個極端陡峭的信任函數，在多相機融合時實質上強制變成了「Winner-Takes-All (距離最近者全拿)」。
 
-    // Task 3: MT1 Noise Rejection (Specifically for dynamic turret camera)
-    // Since MT1 relies on pure vision PnP, tiny pixel jitters over 3 meters are
-    // amplified into intense Yaw noise.
-    // If it is dynamic, completely discard MT1 Heading: completely distruct the
-    // camera yaw caused by turret rotation.
-    double rotStd = isDynamic ? 9999999.0 : cam.standardDeviations[2] * scaleFactor;
+    double dist = poseEstimate.avgTagDist();
+    int numTags = poseEstimate.fiducialIds().length;
 
-    double xyStd = Math.max(xStd, yStd);
-    Matrix<N3, N1> visionStdDevs = VecBuilder.fill(xyStd, xyStd, rotStd);
+    // 二次方程式幾何退化模型
+    double xyStdDev =
+        VisionConstants.kBaseXYStdDev
+            + (dist * VisionConstants.kXYStdDevPerMeter)
+            + (Math.pow(dist, 2) * VisionConstants.kXYStdDevPerMeterSq);
+
+    // 單標籤的 Heading (Yaw) 在遠距離極度不可靠，給予專屬懲罰
+    double thetaStdDev =
+        (numTags == 1) ? VisionConstants.kSingleTagThetaStdDev : VisionConstants.kBaseThetaStdDev;
+
+    // If it is dynamic OR kForceGyroHeading is active, we completely discard
+    // vision Heading by setting variance to INFINITY.
+    double rotStd =
+        (isDynamic || VisionConstants.kForceGyroHeading)
+            ? VisionConstants.kLargeVariance
+            : thetaStdDev;
+
+    Matrix<N3, N1> visionStdDevs = VecBuilder.fill(xyStdDev, xyStdDev, rotStd);
 
     return Optional.of(
         new VisionFieldPoseEstimate(
@@ -573,12 +616,12 @@ public class VisionSubsystem extends Subsystem {
 
   @Override
   public boolean checkConnectionActive() {
-    return inputs.cameraFrontConnected || inputs.cameraLeftConnected || inputs.cameraRightConnected;
+    return inputs.cameraFrontConnected || inputs.cameraLeftConnected || inputs.cameraUpConnected;
   }
 
   @Override
   public boolean checkConnectionPassive() {
-    return inputs.cameraFrontConnected || inputs.cameraLeftConnected || inputs.cameraRightConnected;
+    return inputs.cameraFrontConnected || inputs.cameraLeftConnected || inputs.cameraUpConnected;
   }
 
   @Override
@@ -608,7 +651,7 @@ public class VisionSubsystem extends Subsystem {
     return inputs.cameraLeftConnected;
   }
 
-  public boolean isCameraRightConnected() {
-    return inputs.cameraRightConnected;
+  public boolean isCameraUpConnected() {
+    return inputs.cameraUpConnected;
   }
 }

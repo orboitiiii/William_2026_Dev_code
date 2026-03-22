@@ -25,12 +25,12 @@ import frc.robot.auto.actions.Action;
  *
  * <pre>{@code
  * public class MyAutoMode extends AutoModeBase {
- *     @Override
- *     protected void routine() throws AutoModeEndedException {
- *         runAction(new DriveTrajectoryAction(trajectory));
- *         runAction(new WaitAction(0.5));
- *         runAction(new ShootAction());
- *     }
+ *   @Override
+ *   protected void routine() throws AutoModeEndedException {
+ *     runAction(new DriveTrajectoryAction(trajectory));
+ *     runAction(new WaitAction(0.5));
+ *     runAction(new ShootAction());
+ *   }
  * }
  * }</pre>
  *
@@ -58,6 +58,16 @@ public abstract class AutoModeBase {
    * @throws AutoModeEndedException When the routine is stopped early.
    */
   protected abstract void routine() throws AutoModeEndedException;
+
+  /**
+   * Returns the starting pose of this autonomous routine.
+   *
+   * <p>Override this in subclasses if the routine needs to start at a specific field location. The
+   * Robot class uses this to initialize odometry before starting the routine thread.
+   */
+  public edu.wpi.first.math.geometry.Pose2d getInitialPose() {
+    return null;
+  }
 
   /**
    * Executes the autonomous routine.

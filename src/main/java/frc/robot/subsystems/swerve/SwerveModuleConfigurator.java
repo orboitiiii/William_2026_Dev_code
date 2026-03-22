@@ -78,7 +78,9 @@ public class SwerveModuleConfigurator {
     driveConfig.Slot0.kP = Constants.Swerve.Control.kDrivekP;
     driveConfig.Slot0.kI = Constants.Swerve.Control.kDrivekI;
     driveConfig.Slot0.kD = Constants.Swerve.Control.kDrivekD;
+    driveConfig.Slot0.kS = Constants.Swerve.Control.kDrivekS;
     driveConfig.Slot0.kV = Constants.Swerve.Control.kDrivekV;
+    driveConfig.Slot0.kA = Constants.Swerve.Control.kDrivekA;
 
     driveConfig.CurrentLimits.SupplyCurrentLimit =
         Constants.Swerve.Control.kDriveSupplyCurrentLimit;
@@ -113,6 +115,10 @@ public class SwerveModuleConfigurator {
         Constants.Swerve.Control.kSteerSupplyCurrentLimit;
     steerConfig.CurrentLimits.SupplyCurrentLimitEnable =
         Constants.Swerve.Control.kSteerSupplyCurrentLimitEnable;
+    steerConfig.CurrentLimits.StatorCurrentLimit =
+        Constants.Swerve.Control.kSteerStatorCurrentLimit;
+    steerConfig.CurrentLimits.StatorCurrentLimitEnable =
+        Constants.Swerve.Control.kSteerStatorCurrentLimitEnable;
 
     steerConfig.ClosedLoopRamps.VoltageClosedLoopRampPeriod =
         Constants.Swerve.Control.kClosedLoopRampPeriod;
